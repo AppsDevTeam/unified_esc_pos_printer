@@ -45,7 +45,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  unified_esc_pos_printer: any
+  unified_esc_pos_printer: ^3.1.0
 ```
 
 ### Android Setup
