@@ -51,7 +51,11 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
 
     if (localIp == null || localIp.isEmpty) {
       _setState(PrinterConnectionState.disconnected);
-      return;
+      throw const PrinterScanException(
+        'Cannot determine local WiFi IP address. '
+        'Ensure the device is connected to a WiFi network and '
+        'required permissions are granted.',
+      );
     }
 
     // Derive subnet prefix (e.g. '192.168.1')
@@ -63,8 +67,8 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
 
     final String subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
 
-    final StreamController<NetworkPrinterDevice> hitController =
-        StreamController<NetworkPrinterDevice>();
+    // Each probe gets the full scan timeout so slow printers are not missed.
+    final Duration probeTimeout = timeout;
 
     // Fan-out 254 parallel TCP probe connections.
     final List<Future<void>> probes = List.generate(254, (i) async {
@@ -74,36 +78,21 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
         final Socket s = await Socket.connect(
           host,
           scanPort,
-          timeout: Duration(milliseconds: kScanSubnetTimeoutMs),
+          timeout: probeTimeout,
         );
 
         await s.close();
         s.destroy();
 
-        if (!hitController.isClosed) {
-          hitController.add(
-            NetworkPrinterDevice(name: host, host: host, port: scanPort),
-          );
-        }
+        found.add(
+          NetworkPrinterDevice(name: host, host: host, port: scanPort),
+        );
       } catch (_) {
         // Host not reachable — ignore
       }
     });
 
-    // Emit accumulated results as devices are discovered.
-    final StreamSubscription<NetworkPrinterDevice> sub =
-        hitController.stream.listen((device) {
-      found.add(device);
-    });
-
-    // Race between timeout and all probes finishing.
-    await Future.any([
-      Future.wait(probes),
-      Future.delayed(timeout),
-    ]);
-
-    await hitController.close();
-    await sub.cancel();
+    await Future.wait(probes);
 
     _setState(PrinterConnectionState.disconnected);
 

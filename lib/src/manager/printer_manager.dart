@@ -69,7 +69,7 @@ class PrinterManager {
     },
   }) {
     final StreamController<List<PrinterDevice>> controller =
-        StreamController<List<PrinterDevice>>.broadcast();
+        StreamController<List<PrinterDevice>>();
 
     final Map<PrinterConnectionType, List<PrinterDevice>> buckets = {};
 

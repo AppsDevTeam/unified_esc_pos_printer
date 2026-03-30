@@ -83,7 +83,12 @@ class _PrinterDemoPageState extends State<PrinterDemoPage> {
 
     _scanSub?.cancel();
     _scanSub = _manager
-        .scanAll(timeout: const Duration(seconds: 5), types: types)
+        .scanAll(
+          timeout: Duration(
+            seconds: types.contains(PrinterConnectionType.network) ? 30 : 5,
+          ),
+          types: types,
+        )
         .listen(
       (devices) {
         if (mounted) {
@@ -96,8 +101,11 @@ class _PrinterDemoPageState extends State<PrinterDemoPage> {
       onDone: () {
         if (mounted) setState(() => _scanning = false);
       },
-      onError: (_) {
-        if (mounted) setState(() => _scanning = false);
+      onError: (Object error) {
+        if (mounted) {
+          setState(() => _scanning = false);
+          _showSnack('Scan error: $error');
+        }
       },
     );
   }
