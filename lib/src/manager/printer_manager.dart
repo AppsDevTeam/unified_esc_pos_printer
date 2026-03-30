@@ -11,6 +11,10 @@ import '../core/ticket.dart';
 import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
+import '../utils/printer_log_level.dart';
+import '../utils/printer_logger.dart';
+
+const String _tag = 'Manager';
 
 /// Unified facade for all ESC/POS printer operations.
 ///
@@ -32,6 +36,8 @@ import '../models/printer_device.dart';
 /// ```
 class PrinterManager {
   PrinterManager({
+    PrinterLogLevel logLevel = PrinterLogLevel.none,
+    void Function(PrinterLogLevel level, String tag, String message)? onLog,
     NetworkConnector? networkConnector,
     BleConnector? bleConnector,
     BluetoothConnector? bluetoothConnector,
@@ -39,7 +45,9 @@ class PrinterManager {
   })  : _network = networkConnector ?? NetworkConnector(),
         _ble = bleConnector ?? BleConnector(),
         _bluetooth = bluetoothConnector ?? BluetoothConnector(),
-        _usb = usbConnector ?? UsbConnector();
+        _usb = usbConnector ?? UsbConnector() {
+    PrinterLogger.configure(level: logLevel, onLog: onLog);
+  }
 
   final NetworkConnector _network;
   final BleConnector _ble;
@@ -68,6 +76,7 @@ class PrinterManager {
       PrinterConnectionType.usb,
     },
   }) {
+    PrinterLogger.info(_tag, 'Starting scan for types: $types');
     final StreamController<List<PrinterDevice>> controller =
         StreamController<List<PrinterDevice>>();
 
@@ -92,10 +101,15 @@ class PrinterManager {
           buckets[type] = devices;
           emit();
         },
-        onError: (_) {},
+        onError: (Object e) {
+          PrinterLogger.warning(_tag, '${type.name} scan error: $e');
+        },
         onDone: () {
           pending--;
-          if (pending == 0 && !controller.isClosed) controller.close();
+          if (pending == 0 && !controller.isClosed) {
+            PrinterLogger.info(_tag, 'All scans complete');
+            controller.close();
+          }
         },
         cancelOnError: false,
       );
@@ -160,7 +174,15 @@ class PrinterManager {
     PrinterDevice device, {
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    if (_active != null) await disconnect();
+    if (_active != null) {
+      PrinterLogger.debug(
+        _tag,
+        'Already connected — disconnecting previous device',
+      );
+      await disconnect();
+    }
+
+    PrinterLogger.info(_tag, 'Connecting to ${device.name}');
 
     final PrinterConnector<PrinterDevice> connector = _connectorFor(device);
 
@@ -177,6 +199,10 @@ class PrinterManager {
 
   /// Disconnect from the currently connected printer.
   Future<void> disconnect() async {
+    if (_activeDevice != null) {
+      PrinterLogger.info(_tag, 'Disconnecting from ${_activeDevice?.name}');
+    }
+
     await _activeStateSub?.cancel();
     _activeStateSub = null;
 
@@ -192,18 +218,21 @@ class PrinterManager {
   /// Send the bytes from [ticket] to the connected printer.
   Future<void> printTicket(Ticket ticket) async {
     _assertConnected('printTicket');
+    PrinterLogger.info(_tag, 'Printing ticket (${ticket.bytes.length} bytes)');
     await _active!.writeBytes(ticket.bytes);
   }
 
   /// Send raw [bytes] to the connected printer.
   Future<void> printBytes(List<int> bytes) async {
     _assertConnected('printBytes');
+    PrinterLogger.debug(_tag, 'Printing ${bytes.length} raw bytes');
     await _active!.writeBytes(bytes);
   }
 
   /// Open the cash drawer connected to [pin] (default: pin 2).
   Future<void> openCashDrawer({CashDrawer pin = CashDrawer.pin2}) async {
     _assertConnected('openCashDrawer');
+    PrinterLogger.info(_tag, 'Opening cash drawer (${pin.name})');
 
     final List<int> bytes = pin == CashDrawer.pin2
         ? cCashDrawerPin2.codeUnits
@@ -228,6 +257,7 @@ class PrinterManager {
 
   /// Disconnect and release all connector resources.
   Future<void> dispose() async {
+    PrinterLogger.debug(_tag, 'Disposing');
     await disconnect();
     await _stateController.close();
     await _network.dispose();

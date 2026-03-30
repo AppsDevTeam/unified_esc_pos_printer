@@ -5,7 +5,10 @@ import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
 import '../platform/bluetooth_platform_channel.dart';
+import '../utils/printer_logger.dart';
 import 'printer_connector.dart';
+
+const String _tag = 'BLE';
 
 /// Connector for BLE (Bluetooth Low Energy) ESC/POS printers.
 ///
@@ -42,10 +45,12 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     Duration timeout = const Duration(seconds: 5),
   }) async* {
     _setState(PrinterConnectionState.scanning);
+    PrinterLogger.info(_tag, 'Starting scan (timeout: ${timeout.inSeconds}s)');
 
     // Request permissions first
     final bool granted = await _platform.requestBluetoothPermissions();
     if (!granted) {
+      PrinterLogger.error(_tag, 'Bluetooth permissions denied');
       _setState(PrinterConnectionState.disconnected);
       throw const PrinterPermissionException(
         'Bluetooth permissions were denied',
@@ -66,7 +71,13 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
         ));
       }
 
-      if (found.isNotEmpty) yield List<BlePrinterDevice>.from(found);
+      if (found.isNotEmpty) {
+        PrinterLogger.debug(
+          _tag,
+          'Found ${found.length} bonded BLE device(s)',
+        );
+        yield List<BlePrinterDevice>.from(found);
+      }
     } catch (_) {
       // Ignore — permissions may be denied; scan below will also fail.
     }
@@ -79,6 +90,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
         timeoutMs: timeout.inMilliseconds,
       );
     } catch (e) {
+      PrinterLogger.error(_tag, 'Failed to start BLE scan: $e');
       _setState(PrinterConnectionState.disconnected);
 
       if (found.isNotEmpty) return;
@@ -91,8 +103,10 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
         for (final Map<String, dynamic> d in devices) {
           final String id = d['deviceId'] as String;
           if (!found.any((dev) => dev.deviceId == id)) {
+            final String name = (d['name'] as String?) ?? id;
+            PrinterLogger.debug(_tag, 'Discovered: $name ($id)');
             found.add(BlePrinterDevice(
-              name: (d['name'] as String?) ?? id,
+              name: name,
               deviceId: id,
             ));
           }
@@ -113,6 +127,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     ]);
 
     await scanSub.cancel();
+    PrinterLogger.info(_tag, 'Scan complete — found ${found.length} device(s)');
     _setState(PrinterConnectionState.disconnected);
 
     if (found.isNotEmpty) yield found;
@@ -127,6 +142,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     }
 
     if (_state == PrinterConnectionState.scanning) {
+      PrinterLogger.debug(_tag, 'Stopping scan');
       _setState(PrinterConnectionState.disconnected);
     }
   }
@@ -137,11 +153,13 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     Duration timeout = const Duration(seconds: 10),
   }) async {
     _assertState(PrinterConnectionState.disconnected, 'connect');
+    PrinterLogger.info(_tag, 'Connecting to ${device.name} (${device.deviceId})');
     _setState(PrinterConnectionState.connecting);
 
     // Request permissions
     final bool granted = await _platform.requestBluetoothPermissions();
     if (!granted) {
+      PrinterLogger.error(_tag, 'Bluetooth permissions denied');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw const PrinterPermissionException(
@@ -157,6 +175,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
         characteristicUuid: device.txCharacteristicUuid,
       );
     } catch (e) {
+      PrinterLogger.error(_tag, 'Connection failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterConnectionException(
@@ -168,13 +187,19 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     // Get negotiated MTU
     try {
       _mtuPayload = await _platform.bleGetMtu();
+      PrinterLogger.debug(_tag, 'Negotiated MTU payload: $_mtuPayload bytes');
     } catch (_) {
       _mtuPayload = 20; // safe minimum
+      PrinterLogger.warning(_tag, 'MTU negotiation failed, using default: 20');
     }
 
     // Check write-without-response support
     try {
       _writeWithoutResponse = await _platform.bleSupportsWriteWithoutResponse();
+      PrinterLogger.debug(
+        _tag,
+        'Write-without-response: $_writeWithoutResponse',
+      );
     } catch (_) {
       _writeWithoutResponse = false;
     }
@@ -185,11 +210,16 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
         .listen((event) {
       if (event['state'] == 'disconnected' &&
           _state != PrinterConnectionState.disconnected) {
+        PrinterLogger.warning(_tag, 'Remote disconnection detected');
         _setState(PrinterConnectionState.error);
         _setState(PrinterConnectionState.disconnected);
       }
     });
 
+    PrinterLogger.info(
+      _tag,
+      'Connected to ${device.name} (MTU: $_mtuPayload)',
+    );
     _setState(PrinterConnectionState.connected);
   }
 
@@ -198,6 +228,12 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
 
     _setState(PrinterConnectionState.printing);
+
+    final int chunks = (bytes.length / _mtuPayload).ceil();
+    PrinterLogger.debug(
+      _tag,
+      'Writing ${bytes.length} bytes in $chunks chunk(s)',
+    );
 
     try {
       for (int i = 0; i < bytes.length; i += _mtuPayload) {
@@ -210,6 +246,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
 
       _setState(PrinterConnectionState.connected);
     } catch (e) {
+      PrinterLogger.error(_tag, 'Write failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('BLE write failed', cause: e);
@@ -220,6 +257,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
   Future<void> disconnect() async {
     if (_state == PrinterConnectionState.disconnected) return;
 
+    PrinterLogger.info(_tag, 'Disconnecting');
     _setState(PrinterConnectionState.disconnecting);
 
     await _connectionSub?.cancel();

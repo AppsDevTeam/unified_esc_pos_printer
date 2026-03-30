@@ -6,7 +6,10 @@ import '../../core/commands.dart';
 import '../../exceptions/printer_exception.dart';
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
+import '../../utils/printer_logger.dart';
 import 'usb_connector_interface.dart';
+
+const String _tag = 'USB-Android';
 
 /// USB connector for Android using the `usb_serial` plugin.
 ///
@@ -31,10 +34,12 @@ class UsbConnectorImpl extends UsbConnectorBase {
     Duration timeout = const Duration(seconds: 5),
   }) async* {
     _setState(PrinterConnectionState.scanning);
+    PrinterLogger.info(_tag, 'Scanning for USB devices');
     final List<UsbDevice> devices = await UsbSerial.listDevices();
     _setState(PrinterConnectionState.disconnected);
 
     if (devices.isNotEmpty) {
+      PrinterLogger.info(_tag, 'Found ${devices.length} USB device(s)');
       yield devices
           .map((d) => UsbPrinterDevice(
                 name: d.productName ?? 'USB Device ${d.vid}:${d.pid}',
@@ -42,6 +47,8 @@ class UsbConnectorImpl extends UsbConnectorBase {
                 usbPlatform: UsbPlatform.android,
               ))
           .toList();
+    } else {
+      PrinterLogger.debug(_tag, 'No USB devices found');
     }
   }
 
@@ -58,6 +65,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
     Duration timeout = const Duration(seconds: 5),
   }) async {
     _assertState(PrinterConnectionState.disconnected, 'connect');
+    PrinterLogger.info(_tag, 'Connecting to ${device.identifier}');
     _setState(PrinterConnectionState.connecting);
 
     // Find the matching USB device.
@@ -71,6 +79,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
     }
 
     if (found == null) {
+      PrinterLogger.error(_tag, 'Device ${device.identifier} not found');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterNotFoundException(
@@ -94,16 +103,14 @@ class UsbConnectorImpl extends UsbConnectorBase {
       bool opened = false;
       for (final String type in typesToTry) {
         try {
-          // ignore: avoid_print
-          print('USB_DEBUG: trying serial type "$type"...');
+          PrinterLogger.debug(_tag, 'Trying serial type: "${type.isEmpty ? "auto" : type}"');
           final UsbPort? candidate = await found.create(type);
           if (candidate == null) continue;
           final bool didOpen = await candidate.open();
           if (didOpen) {
             port = candidate;
             opened = true;
-            // ignore: avoid_print
-            print('USB_DEBUG: serial type "$type" worked!');
+            PrinterLogger.debug(_tag, 'Serial type "${type.isEmpty ? "auto" : type}" worked');
             break;
           }
           // open() failed — close and try next
@@ -115,26 +122,19 @@ class UsbConnectorImpl extends UsbConnectorBase {
 
       // If no serial type worked, try raw bulk USB transfer (for direct USB printers).
       if (!opened) {
-        // ignore: avoid_print
-        print('USB_DEBUG: serial types failed, trying raw USB...');
+        PrinterLogger.debug(_tag, 'Serial types failed, trying raw USB');
         port = await UsbSerial.createRawFromDeviceId(found.deviceId);
         if (port == null) throw Exception('Could not create UsbPort – device not recognized');
         opened = await port.open();
-        // ignore: avoid_print
-        print('USB_DEBUG: raw USB open() returned $opened');
+        PrinterLogger.debug(_tag, 'Raw USB open: $opened');
         if (!opened) throw Exception('UsbPort.open() returned false');
       }
 
       final UsbPort openPort = port ?? (throw Exception('port is null'));
 
-      // ignore: avoid_print
-      print('USB_DEBUG: setting DTR...');
+      PrinterLogger.debug(_tag, 'Configuring port (DTR, RTS, 115200 8N1)');
       await openPort.setDTR(true);
-      // ignore: avoid_print
-      print('USB_DEBUG: setting RTS...');
       await openPort.setRTS(true);
-      // ignore: avoid_print
-      print('USB_DEBUG: setting port parameters...');
       openPort.setPortParameters(
         kDefaultBaudRate,
         UsbPort.DATABITS_8,
@@ -143,25 +143,20 @@ class UsbConnectorImpl extends UsbConnectorBase {
       );
 
       // Send ESC @ to initialise the printer.
-      // ignore: avoid_print
-      print('USB_DEBUG: writing init command...');
       await openPort.write(Uint8List.fromList(cInit.codeUnits));
 
       _port = port;
+      PrinterLogger.info(_tag, 'Connected to ${device.identifier}');
       _setState(PrinterConnectionState.connected);
-      // ignore: avoid_print
-      print('USB_DEBUG: connected!');
     } on PlatformException catch (e) {
       final UsbException usbError = UsbException.fromPlatformException(e);
-      // ignore: avoid_print
-      print('USB_DEBUG: FAILED with USB error: $usbError');
+      PrinterLogger.error(_tag, 'USB error: $usbError');
       await port?.close();
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw _mapUsbException(usbError, device.identifier);
     } catch (e) {
-      // ignore: avoid_print
-      print('USB_DEBUG: FAILED at step: $e');
+      PrinterLogger.error(_tag, 'Connection failed: $e');
       await port?.close();
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
@@ -177,14 +172,17 @@ class UsbConnectorImpl extends UsbConnectorBase {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
     _setState(PrinterConnectionState.printing);
     try {
+      PrinterLogger.debug(_tag, 'Writing ${bytes.length} bytes');
       await _port!.write(Uint8List.fromList(bytes));
       _setState(PrinterConnectionState.connected);
     } on PlatformException catch (e) {
       final UsbException usbError = UsbException.fromPlatformException(e);
+      PrinterLogger.error(_tag, 'Write failed: $usbError');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw _mapUsbException(usbError, 'write');
     } catch (e) {
+      PrinterLogger.error(_tag, 'Write failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('USB write failed', cause: e);
@@ -194,6 +192,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
   @override
   Future<void> disconnect() async {
     if (_state == PrinterConnectionState.disconnected) return;
+    PrinterLogger.info(_tag, 'Disconnecting');
     _setState(PrinterConnectionState.disconnecting);
     try {
       await _port?.close();

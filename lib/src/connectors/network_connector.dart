@@ -5,7 +5,10 @@ import '../core/commands.dart';
 import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
+import '../utils/printer_logger.dart';
 import 'printer_connector.dart';
+
+const String _tag = 'Network';
 
 /// Connector for network (TCP/IP) ESC/POS printers.
 ///
@@ -52,15 +55,20 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
           // Skip loopback and link-local addresses.
           if (ip.startsWith('127.') || ip.startsWith('169.254.')) continue;
           localIp = ip;
+          PrinterLogger.debug(
+            _tag,
+            'Found local IP: $ip on ${interface.name}',
+          );
           break;
         }
         if (localIp != null) break;
       }
-    } catch (_) {
-      // Failed to enumerate network interfaces.
+    } catch (e) {
+      PrinterLogger.error(_tag, 'Failed to enumerate network interfaces: $e');
     }
 
     if (localIp == null || localIp.isEmpty) {
+      PrinterLogger.error(_tag, 'No usable local IP found — aborting scan');
       _setState(PrinterConnectionState.disconnected);
       throw const PrinterScanException(
         'Cannot determine local WiFi IP address. '
@@ -72,6 +80,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     // Derive subnet prefix (e.g. '192.168.1')
     final List<String> parts = localIp.split('.');
     if (parts.length != 4) {
+      PrinterLogger.error(_tag, 'Invalid IP format: $localIp');
       _setState(PrinterConnectionState.disconnected);
       return;
     }
@@ -81,6 +90,13 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     // Each probe gets the full scan timeout so slow printers are not missed.
     final Duration probeTimeout = timeout;
 
+    PrinterLogger.info(
+      _tag,
+      'Scanning subnet $subnet.* on port $scanPort '
+      '(timeout: ${probeTimeout.inSeconds}s)',
+    );
+
+    final Stopwatch stopwatch = Stopwatch()..start();
     final StreamController<List<NetworkPrinterDevice>> controller =
         StreamController<List<NetworkPrinterDevice>>();
 
@@ -98,6 +114,8 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
         await s.close();
         s.destroy();
 
+        PrinterLogger.info(_tag, 'Found printer at $host:$scanPort');
+
         final NetworkPrinterDevice device = NetworkPrinterDevice(
           name: host,
           host: host,
@@ -109,13 +127,19 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
         // Host not reachable — connection refused.
       } on TimeoutException {
         // Host not reachable within timeout — expected for most IPs
-      } catch (_) {
-        // Unexpected error — skip host.
+      } catch (e) {
+        PrinterLogger.debug(_tag, '$host — unexpected error: $e');
       }
     });
 
     // Close stream when all probes finish.
     Future.wait(probes).whenComplete(() {
+      stopwatch.stop();
+      PrinterLogger.info(
+        _tag,
+        'Scan complete in ${stopwatch.elapsed.inSeconds}s — '
+        'found ${found.length} printer(s)',
+      );
       _setState(PrinterConnectionState.disconnected);
       controller.close();
     });
@@ -126,6 +150,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
   @override
   Future<void> stopScan() async {
     if (_state == PrinterConnectionState.scanning) {
+      PrinterLogger.debug(_tag, 'Stopping scan');
       _setState(PrinterConnectionState.disconnected);
     }
   }
@@ -140,6 +165,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       'connect',
     );
 
+    PrinterLogger.info(_tag, 'Connecting to ${device.host}:${device.port}');
     _setState(PrinterConnectionState.connecting);
 
     try {
@@ -153,8 +179,13 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       _socket!.add(cInit.codeUnits);
       await _socket!.flush();
 
+      PrinterLogger.info(_tag, 'Connected to ${device.host}:${device.port}');
       _setState(PrinterConnectionState.connected);
     } on SocketException catch (e) {
+      PrinterLogger.error(
+        _tag,
+        'Connection failed to ${device.host}:${device.port}: ${e.message}',
+      );
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterConnectionException(
@@ -162,6 +193,10 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
         cause: e,
       );
     } on TimeoutException catch (e) {
+      PrinterLogger.error(
+        _tag,
+        'Connection timed out to ${device.host}:${device.port}',
+      );
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterConnectionException(
@@ -178,10 +213,12 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     _setState(PrinterConnectionState.printing);
 
     try {
+      PrinterLogger.debug(_tag, 'Writing ${bytes.length} bytes');
       _socket!.add(bytes);
       await _socket!.flush();
       _setState(PrinterConnectionState.connected);
     } catch (e) {
+      PrinterLogger.error(_tag, 'Write failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('Failed to write bytes to printer', cause: e);
@@ -194,6 +231,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
   Future<void> disconnect() async {
     if (_state == PrinterConnectionState.disconnected) return;
 
+    PrinterLogger.info(_tag, 'Disconnecting');
     _setState(PrinterConnectionState.disconnecting);
 
     try {

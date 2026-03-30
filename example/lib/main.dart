@@ -31,7 +31,9 @@ class PrinterDemoPage extends StatefulWidget {
 }
 
 class _PrinterDemoPageState extends State<PrinterDemoPage> {
-  final PrinterManager _manager = PrinterManager();
+  final PrinterManager _manager = PrinterManager(
+    logLevel: PrinterLogLevel.debug,
+  );
   final List<PrinterDevice> _devices = [];
 
   StreamSubscription<PrinterConnectionState>? _stateSub;

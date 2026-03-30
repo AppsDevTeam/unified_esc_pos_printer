@@ -7,7 +7,10 @@ import '../../core/commands.dart';
 import '../../exceptions/printer_exception.dart';
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
+import '../../utils/printer_logger.dart';
 import 'usb_connector_interface.dart';
+
+const String _tag = 'USB-Desktop';
 
 /// USB connector for desktop platforms (Windows, Linux, macOS) using
 /// `flutter_libserialport` (wraps libserialport).
@@ -33,6 +36,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
     Duration timeout = const Duration(seconds: 5),
   }) async* {
     _setState(PrinterConnectionState.scanning);
+    PrinterLogger.info(_tag, 'Scanning serial ports');
     final List<String> ports = SerialPort.availablePorts;
     _setState(PrinterConnectionState.disconnected);
 
@@ -46,14 +50,20 @@ class UsbConnectorImpl extends UsbConnectorBase {
           sp.description?.isNotEmpty == true ? sp.description! : path;
       sp.dispose();
 
-      if (transport == SerialPortTransport.bluetooth) continue;
+      if (transport == SerialPortTransport.bluetooth) {
+        PrinterLogger.debug(_tag, 'Skipping Bluetooth port: $path');
+        continue;
+      }
 
+      PrinterLogger.debug(_tag, 'Found port: $path ($name)');
       devices.add(UsbPrinterDevice(
         name: name,
         identifier: path,
         usbPlatform: UsbPlatform.desktop,
       ));
     }
+
+    PrinterLogger.info(_tag, 'Found ${devices.length} serial port(s)');
 
     if (devices.isNotEmpty) {
       yield devices;
@@ -73,6 +83,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
     Duration timeout = const Duration(seconds: 5),
   }) async {
     _assertState(PrinterConnectionState.disconnected, 'connect');
+    PrinterLogger.info(_tag, 'Connecting to ${device.identifier}');
     _setState(PrinterConnectionState.connecting);
 
     final SerialPort port = SerialPort(device.identifier);
@@ -81,6 +92,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
         throw Exception(SerialPort.lastError?.message ?? 'Could not open port');
       }
 
+      PrinterLogger.debug(_tag, 'Configuring port (115200 8N1)');
       final SerialPortConfig config = SerialPortConfig()
         ..baudRate = kDefaultBaudRate
         ..bits = 8
@@ -94,8 +106,10 @@ class UsbConnectorImpl extends UsbConnectorBase {
       port.write(Uint8List.fromList(cInit.codeUnits));
 
       _port = port;
+      PrinterLogger.info(_tag, 'Connected to ${device.identifier}');
       _setState(PrinterConnectionState.connected);
     } catch (e) {
+      PrinterLogger.error(_tag, 'Connection failed: $e');
       port.dispose();
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
@@ -111,9 +125,11 @@ class UsbConnectorImpl extends UsbConnectorBase {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
     _setState(PrinterConnectionState.printing);
     try {
+      PrinterLogger.debug(_tag, 'Writing ${bytes.length} bytes');
       _port!.write(Uint8List.fromList(bytes));
       _setState(PrinterConnectionState.connected);
     } catch (e) {
+      PrinterLogger.error(_tag, 'Write failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('USB serial write failed', cause: e);
@@ -123,6 +139,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
   @override
   Future<void> disconnect() async {
     if (_state == PrinterConnectionState.disconnected) return;
+    PrinterLogger.info(_tag, 'Disconnecting');
     _setState(PrinterConnectionState.disconnecting);
     try {
       _reader?.close();

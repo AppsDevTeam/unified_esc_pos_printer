@@ -7,7 +7,10 @@ import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
 import '../platform/bluetooth_platform_channel.dart';
+import '../utils/printer_logger.dart';
 import 'printer_connector.dart';
+
+const String _tag = 'Bluetooth';
 
 /// Connector for Bluetooth Classic (SPP) ESC/POS printers.
 ///
@@ -45,8 +48,10 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     Duration timeout = const Duration(seconds: 5),
   }) async* {
     _setState(PrinterConnectionState.scanning);
+    PrinterLogger.info(_tag, 'Starting scan (timeout: ${timeout.inSeconds}s)');
 
     if (!Platform.isAndroid && !Platform.isWindows) {
+      PrinterLogger.error(_tag, 'Unsupported platform: ${Platform.operatingSystem}');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw const PrinterConnectionException(
@@ -58,6 +63,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     // Request permissions (no-op on Windows)
     final bool granted = await _platform.requestBluetoothPermissions();
     if (!granted) {
+      PrinterLogger.error(_tag, 'Bluetooth permissions denied');
       _setState(PrinterConnectionState.disconnected);
       throw const PrinterPermissionException(
         'Bluetooth permissions were denied',
@@ -78,7 +84,13 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
         ));
       }
 
-      if (found.isNotEmpty) yield List<BluetoothPrinterDevice>.from(found);
+      if (found.isNotEmpty) {
+        PrinterLogger.debug(
+          _tag,
+          'Found ${found.length} bonded device(s)',
+        );
+        yield List<BluetoothPrinterDevice>.from(found);
+      }
     } catch (_) {
       // Ignore — permissions may be denied; discovery below will also fail.
     }
@@ -92,6 +104,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
         timeoutMs: timeout.inMilliseconds,
       );
     } catch (e) {
+      PrinterLogger.error(_tag, 'Failed to start discovery: $e');
       _setState(PrinterConnectionState.disconnected);
 
       if (found.isNotEmpty) return;
@@ -104,8 +117,10 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
         for (final Map<String, dynamic> d in devices) {
           final String addr = d['address'] as String;
           if (!found.any((dev) => dev.address == addr)) {
+            final String name = (d['name'] as String?) ?? addr;
+            PrinterLogger.debug(_tag, 'Discovered: $name ($addr)');
             found.add(BluetoothPrinterDevice(
-              name: (d['name'] as String?) ?? addr,
+              name: name,
               address: addr,
             ));
           }
@@ -127,6 +142,10 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
 
     await discoverySub.cancel();
 
+    PrinterLogger.info(
+      _tag,
+      'Scan complete — found ${found.length} device(s)',
+    );
     _setState(PrinterConnectionState.disconnected);
 
     if (found.isNotEmpty) yield List<BluetoothPrinterDevice>.from(found);
@@ -143,6 +162,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     }
 
     if (_state == PrinterConnectionState.scanning) {
+      PrinterLogger.debug(_tag, 'Stopping scan');
       _setState(PrinterConnectionState.disconnected);
     }
   }
@@ -153,9 +173,14 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     Duration timeout = const Duration(seconds: 10),
   }) async {
     _assertState(PrinterConnectionState.disconnected, 'connect');
+    PrinterLogger.info(
+      _tag,
+      'Connecting to ${device.name} (${device.address})',
+    );
     _setState(PrinterConnectionState.connecting);
 
     if (!Platform.isAndroid && !Platform.isWindows) {
+      PrinterLogger.error(_tag, 'Unsupported platform: ${Platform.operatingSystem}');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw const PrinterConnectionException(
@@ -167,6 +192,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     // Request permissions (no-op on Windows)
     final bool granted = await _platform.requestBluetoothPermissions();
     if (!granted) {
+      PrinterLogger.error(_tag, 'Bluetooth permissions denied');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw const PrinterPermissionException(
@@ -191,6 +217,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
           .listen((event) {
         if (event['state'] == 'disconnected' &&
             _state != PrinterConnectionState.disconnected) {
+          PrinterLogger.warning(_tag, 'Remote disconnection detected');
           _connectionSub?.cancel();
           _connectionSub = null;
           _setState(PrinterConnectionState.error);
@@ -198,8 +225,16 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
         }
       });
 
+      PrinterLogger.info(
+        _tag,
+        'Connected to ${device.name} (${device.address})',
+      );
       _setState(PrinterConnectionState.connected);
     } on TimeoutException catch (e) {
+      PrinterLogger.error(
+        _tag,
+        'Connection timed out to ${device.address}',
+      );
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterConnectionException(
@@ -207,6 +242,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
         cause: e,
       );
     } catch (e) {
+      PrinterLogger.error(_tag, 'Connection failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterConnectionException(
@@ -221,6 +257,12 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
     _setState(PrinterConnectionState.printing);
 
+    final int chunks = (bytes.length / chunkSize).ceil();
+    PrinterLogger.debug(
+      _tag,
+      'Writing ${bytes.length} bytes in $chunks chunk(s)',
+    );
+
     try {
       for (int i = 0; i < bytes.length; i += chunkSize) {
         final int end = (i + chunkSize).clamp(0, bytes.length);
@@ -231,6 +273,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
 
       _setState(PrinterConnectionState.connected);
     } catch (e) {
+      PrinterLogger.error(_tag, 'Write failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('Bluetooth write failed', cause: e);
@@ -243,6 +286,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
   Future<void> disconnect() async {
     if (_state == PrinterConnectionState.disconnected) return;
 
+    PrinterLogger.info(_tag, 'Disconnecting');
     _setState(PrinterConnectionState.disconnecting);
 
     await _connectionSub?.cancel();

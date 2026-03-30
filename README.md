@@ -372,6 +372,27 @@ try {
 }
 ```
 
+### Debug Logging
+
+Logging is disabled by default. Enable it by setting the log level:
+
+```dart
+final manager = PrinterManager(logLevel: PrinterLogLevel.debug);
+```
+
+Available levels: `none` (default), `error`, `warning`, `info`, `debug`.
+
+To route logs to your own logging framework, use the `onLog` callback:
+
+```dart
+final manager = PrinterManager(
+  logLevel: PrinterLogLevel.debug,
+  onLog: (level, tag, message) {
+    myLogger.log('[$tag] $message');
+  },
+);
+```
+
 ### Raw Bytes
 
 For advanced use cases, send raw ESC/POS command bytes:
@@ -397,6 +418,7 @@ await manager.printBytes([0x1B, 0x40]);
 | `PrinterDevice`          | Abstract base for `NetworkPrinterDevice`, `BlePrinterDevice`, `BluetoothPrinterDevice`, `UsbPrinterDevice` |
 | `PrinterConnectionState` | Connection state enum with validated transitions                                                           |
 | `PrinterException`       | Base exception with subclasses for connection, write, permission, scan, state errors                       |
+| `PrinterLogLevel`        | Log level enum (`none`, `error`, `warning`, `info`, `debug`) for the `logLevel` parameter                  |
 | `PrinterConnector`       | Abstract connector interface (Network, BLE, Bluetooth, USB implementations)                                |
 
 ## Paper Sizes
