@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:network_info_plus/network_info_plus.dart';
-
 import '../core/commands.dart';
 import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
@@ -44,9 +42,22 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     String? localIp;
 
     try {
-      localIp = await NetworkInfo().getWifiIP();
+      final List<NetworkInterface> interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+      );
+
+      for (final NetworkInterface interface in interfaces) {
+        for (final InternetAddress addr in interface.addresses) {
+          final String ip = addr.address;
+          // Skip loopback and link-local addresses.
+          if (ip.startsWith('127.') || ip.startsWith('169.254.')) continue;
+          localIp = ip;
+          break;
+        }
+        if (localIp != null) break;
+      }
     } catch (_) {
-      // Ignore — may not be on WiFi; try anyway
+      // Failed to enumerate network interfaces.
     }
 
     if (localIp == null || localIp.isEmpty) {
@@ -70,6 +81,9 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     // Each probe gets the full scan timeout so slow printers are not missed.
     final Duration probeTimeout = timeout;
 
+    final StreamController<List<NetworkPrinterDevice>> controller =
+        StreamController<List<NetworkPrinterDevice>>();
+
     // Fan-out 254 parallel TCP probe connections.
     final List<Future<void>> probes = List.generate(254, (i) async {
       final String host = '$subnet.${i + 1}';
@@ -84,19 +98,29 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
         await s.close();
         s.destroy();
 
-        found.add(
-          NetworkPrinterDevice(name: host, host: host, port: scanPort),
+        final NetworkPrinterDevice device = NetworkPrinterDevice(
+          name: host,
+          host: host,
+          port: scanPort,
         );
+        found.add(device);
+        controller.add(List<NetworkPrinterDevice>.unmodifiable(found));
+      } on SocketException {
+        // Host not reachable — connection refused.
+      } on TimeoutException {
+        // Host not reachable within timeout — expected for most IPs
       } catch (_) {
-        // Host not reachable — ignore
+        // Unexpected error — skip host.
       }
     });
 
-    await Future.wait(probes);
+    // Close stream when all probes finish.
+    Future.wait(probes).whenComplete(() {
+      _setState(PrinterConnectionState.disconnected);
+      controller.close();
+    });
 
-    _setState(PrinterConnectionState.disconnected);
-
-    if (found.isNotEmpty) yield found;
+    yield* controller.stream;
   }
 
   @override

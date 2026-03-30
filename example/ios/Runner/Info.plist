@@ -30,6 +30,8 @@
 	<string>This app uses Bluetooth to connect to ESC/POS thermal printers.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>This app uses Bluetooth to connect to ESC/POS thermal printers.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>This app needs access to the local network to discover ESC/POS thermal printers.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
