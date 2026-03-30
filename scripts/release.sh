@@ -28,10 +28,10 @@ VERSION="${TAG#v}"
 # Update version in pubspec.yaml
 sed -i '' "s/^version: .*/version: $VERSION/" pubspec.yaml
 
-# Update version in README.md dependency example
-sed -i '' "s/unified_esc_pos_printer: .*/unified_esc_pos_printer: ^$VERSION/" README.md
+# Update ref in README.md git dependency
+sed -i '' "s/ref: v[0-9]*\.[0-9]*\.[0-9]*/ref: $TAG/" README.md
 
-echo "Updated pubspec.yaml version to $VERSION and README.md dependency to ^$VERSION"
+echo "Updated pubspec.yaml version to $VERSION and README.md ref to $TAG"
 
 # Commit and tag
 git add pubspec.yaml README.md
