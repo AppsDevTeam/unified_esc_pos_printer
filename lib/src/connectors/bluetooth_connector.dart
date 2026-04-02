@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data' show Uint8List;
+
+import 'package:flutter/services.dart';
 
 import '../core/commands.dart';
 import '../exceptions/printer_exception.dart';
@@ -140,7 +141,11 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       Future.delayed(timeout),
     ]);
 
-    await discoverySub.cancel();
+    try {
+      await discoverySub.cancel();
+    } on PlatformException catch (_) {
+      // Native stream may already be deactivated after discovery timeout.
+    }
 
     PrinterLogger.info(
       _tag,

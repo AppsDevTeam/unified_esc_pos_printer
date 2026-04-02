@@ -1,5 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
+
+import 'package:flutter/services.dart';
 
 import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
@@ -126,7 +127,11 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
       Future.delayed(timeout),
     ]);
 
-    await scanSub.cancel();
+    try {
+      await scanSub.cancel();
+    } on PlatformException catch (_) {
+      // Native stream may already be deactivated after scan timeout.
+    }
     PrinterLogger.info(_tag, 'Scan complete — found ${found.length} device(s)');
     _setState(PrinterConnectionState.disconnected);
 
