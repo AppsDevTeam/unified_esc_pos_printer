@@ -11,20 +11,20 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var discoveredDevices: [[String: String]] = []
     private var scanTimer: Timer?
 
-    // Connection state
-    private var connectedPeripheral: CBPeripheral?
-    private var txCharacteristic: CBCharacteristic?
-    private var mtuPayload: Int = 20
-    private var canWriteWithoutResponse: Bool = false
-    private var connectResult: FlutterResult?
-    private var writeResult: FlutterResult?
-    private var pendingWriteData: Data?
-    private var pendingWriteResult: FlutterResult?
-    private var connectTimer: Timer?
-    private var targetServiceUUID: CBUUID?
-    private var targetCharUUID: CBUUID?
+    // Per-device connection state, keyed by peripheral UUID string
+    private var connectedPeripherals: [String: CBPeripheral] = [:]
+    private var txCharacteristics: [String: CBCharacteristic] = [:]
+    private var mtuPayloads: [String: Int] = [:]
+    private var canWriteWithoutResponses: [String: Bool] = [:]
+    private var connectResults: [String: FlutterResult] = [:]
+    private var writeResults: [String: FlutterResult] = [:]
+    private var pendingWriteDatas: [String: Data] = [:]
+    private var pendingWriteResults: [String: FlutterResult] = [:]
+    private var connectTimers: [String: Timer] = [:]
+    private var targetServiceUUIDs: [String: CBUUID] = [:]
+    private var targetCharUUIDs: [String: CBUUID] = [:]
 
-    var connectionStateCallback: ((String) -> Void)?
+    var connectionStateCallback: ((String, String) -> Void)?
 
     // Lazy init to avoid triggering the BT permission dialog on plugin load
     private func ensureCentralManager() {
@@ -43,15 +43,11 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func requestPermissions(result: @escaping FlutterResult) {
         ensureCentralManager()
-        // On iOS, creating CBCentralManager triggers the system dialog if needed.
-        // We just check the current state.
         if #available(iOS 13.1, *) {
             switch CBCentralManager.authorization {
             case .allowedAlways:
                 result(true)
             case .notDetermined:
-                // Dialog was just triggered by ensureCentralManager(). Return true
-                // optimistically — if denied, scan/connect will fail with clear errors.
                 result(true)
             case .denied, .restricted:
                 result(false)
@@ -59,7 +55,6 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                 result(true)
             }
         } else {
-            // Pre-13.1, permission is always granted if BT is available
             result(centralManager?.state == .poweredOn)
         }
     }
@@ -71,9 +66,6 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
 
-        // iOS has no bonded device list. Retrieve peripherals that are
-        // currently connected to the system (any service) as a best-effort
-        // equivalent.
         let connected = cm.retrieveConnectedPeripherals(withServices: [
             BleManager.escPosServiceUUID
         ])
@@ -99,7 +91,6 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             CBCentralManagerScanOptionAllowDuplicatesKey: false
         ])
 
-        // Auto-stop after timeout
         let timeout = Double(timeoutMs) / 1000.0
         scanTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
             self?.stopScanInternal()
@@ -131,8 +122,8 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
 
-        targetServiceUUID = serviceUuid != nil ? CBUUID(string: serviceUuid!) : BleManager.escPosServiceUUID
-        targetCharUUID = characteristicUuid != nil ? CBUUID(string: characteristicUuid!) : BleManager.escPosTxCharUUID
+        targetServiceUUIDs[deviceId] = serviceUuid != nil ? CBUUID(string: serviceUuid!) : BleManager.escPosServiceUUID
+        targetCharUUIDs[deviceId] = characteristicUuid != nil ? CBUUID(string: characteristicUuid!) : BleManager.escPosTxCharUUID
 
         let peripherals = cm.retrievePeripherals(withIdentifiers: [uuid])
         guard let peripheral = peripherals.first else {
@@ -140,74 +131,82 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
 
-        connectResult = result
-        connectedPeripheral = peripheral
+        // Clean up any existing connection
+        cleanupConnection(deviceId)
+
+        connectResults[deviceId] = result
+        connectedPeripherals[deviceId] = peripheral
         peripheral.delegate = self
 
         cm.connect(peripheral, options: nil)
 
         // Timeout
         let timeout = Double(timeoutMs) / 1000.0
-        connectTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
-            guard let self = self, self.connectResult != nil else { return }
+        connectTimers[deviceId] = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
+            guard let self = self, self.connectResults[deviceId] != nil else { return }
             cm.cancelPeripheralConnection(peripheral)
-            self.connectResult?(FlutterError(code: "TIMEOUT", message: "BLE connection timed out", details: nil))
-            self.connectResult = nil
-            self.connectedPeripheral = nil
+            self.connectResults.removeValue(forKey: deviceId)?(FlutterError(code: "TIMEOUT", message: "BLE connection timed out", details: nil))
+            self.connectedPeripherals.removeValue(forKey: deviceId)
         }
     }
 
-    func getMtu(result: @escaping FlutterResult) {
-        result(mtuPayload)
+    func getMtu(deviceId: String, result: @escaping FlutterResult) {
+        result(mtuPayloads[deviceId] ?? 20)
     }
 
-    func supportsWriteWithoutResponse(result: @escaping FlutterResult) {
-        result(canWriteWithoutResponse)
+    func supportsWriteWithoutResponse(deviceId: String, result: @escaping FlutterResult) {
+        result(canWriteWithoutResponses[deviceId] ?? false)
     }
 
-    func write(data: Data, withoutResponse: Bool, result: @escaping FlutterResult) {
-        guard let peripheral = connectedPeripheral, let char = txCharacteristic else {
-            result(FlutterError(code: "NOT_CONNECTED", message: "BLE device not connected", details: nil))
+    func write(deviceId: String, data: Data, withoutResponse: Bool, result: @escaping FlutterResult) {
+        guard let peripheral = connectedPeripherals[deviceId], let char = txCharacteristics[deviceId] else {
+            result(FlutterError(code: "NOT_CONNECTED", message: "BLE device not connected: \(deviceId)", details: nil))
             return
         }
 
         if withoutResponse {
-            // CoreBluetooth has a finite internal queue for write-without-response packets.
-            // If we write when the queue is full, the packet is silently dropped.
-            // Check canSendWriteWithoutResponse first; if not ready, park the write and
-            // resolve it from peripheralIsReady(toSendWriteWithoutResponse:).
             if peripheral.canSendWriteWithoutResponse {
                 peripheral.writeValue(data, for: char, type: .withoutResponse)
                 result(nil)
             } else {
-                pendingWriteData = data
-                pendingWriteResult = result
+                pendingWriteDatas[deviceId] = data
+                pendingWriteResults[deviceId] = result
             }
         } else {
-            writeResult = result
+            writeResults[deviceId] = result
             peripheral.writeValue(data, for: char, type: .withResponse)
         }
     }
 
-    func disconnect(result: @escaping FlutterResult) {
-        if let peripheral = connectedPeripheral, let cm = centralManager {
+    func disconnect(deviceId: String, result: @escaping FlutterResult) {
+        if let peripheral = connectedPeripherals[deviceId], let cm = centralManager {
             cm.cancelPeripheralConnection(peripheral)
         }
-        cleanup()
-        connectionStateCallback?("disconnected")
+        cleanupConnection(deviceId)
+        connectionStateCallback?(deviceId, "disconnected")
         result(nil)
     }
 
-    private func cleanup() {
-        connectTimer?.invalidate()
-        connectTimer = nil
-        connectedPeripheral = nil
-        txCharacteristic = nil
-        mtuPayload = 20
-        canWriteWithoutResponse = false
-        pendingWriteData = nil
-        pendingWriteResult = nil
+    private func cleanupConnection(_ deviceId: String) {
+        connectTimers.removeValue(forKey: deviceId)?.invalidate()
+        connectedPeripherals.removeValue(forKey: deviceId)
+        txCharacteristics.removeValue(forKey: deviceId)
+        mtuPayloads.removeValue(forKey: deviceId)
+        canWriteWithoutResponses.removeValue(forKey: deviceId)
+        pendingWriteDatas.removeValue(forKey: deviceId)
+        pendingWriteResults.removeValue(forKey: deviceId)
+        connectResults.removeValue(forKey: deviceId)
+        writeResults.removeValue(forKey: deviceId)
+        targetServiceUUIDs.removeValue(forKey: deviceId)
+        targetCharUUIDs.removeValue(forKey: deviceId)
     }
+
+    /// Resolve the deviceId (peripheral UUID string) for a given CBPeripheral.
+    private func deviceId(for peripheral: CBPeripheral) -> String {
+        return peripheral.identifier.uuidString
+    }
+
+    // MARK: - CBCentralManagerDelegate
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         // State changes are handled implicitly — if BT turns off,
@@ -230,42 +229,39 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        // Discover services
         peripheral.discoverServices(nil)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        connectTimer?.invalidate()
-        connectTimer = nil
-        connectResult?(FlutterError(code: "CONNECTION_FAILED", message: "Failed to connect: \(error?.localizedDescription ?? "unknown")", details: nil))
-        connectResult = nil
-        connectedPeripheral = nil
+        let id = deviceId(for: peripheral)
+        connectTimers.removeValue(forKey: id)?.invalidate()
+        connectResults.removeValue(forKey: id)?(FlutterError(code: "CONNECTION_FAILED", message: "Failed to connect: \(error?.localizedDescription ?? "unknown")", details: nil))
+        connectedPeripherals.removeValue(forKey: id)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        if connectResult != nil {
-            connectTimer?.invalidate()
-            connectTimer = nil
-            connectResult?(FlutterError(code: "DISCONNECTED", message: "Disconnected during setup", details: nil))
-            connectResult = nil
+        let id = deviceId(for: peripheral)
+        if connectResults[id] != nil {
+            connectTimers.removeValue(forKey: id)?.invalidate()
+            connectResults.removeValue(forKey: id)?(FlutterError(code: "DISCONNECTED", message: "Disconnected during setup", details: nil))
         } else {
             // Remote disconnection
-            connectionStateCallback?("disconnected")
+            connectionStateCallback?(id, "disconnected")
         }
-        cleanup()
+        cleanupConnection(id)
     }
 
+    // MARK: - CBPeripheralDelegate
+
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        let id = deviceId(for: peripheral)
         if let error = error {
-            connectTimer?.invalidate()
-            connectTimer = nil
+            connectTimers.removeValue(forKey: id)?.invalidate()
             centralManager?.cancelPeripheralConnection(peripheral)
-            connectResult?(FlutterError(code: "SERVICE_DISCOVERY_FAILED", message: error.localizedDescription, details: nil))
-            connectResult = nil
+            connectResults.removeValue(forKey: id)?(FlutterError(code: "SERVICE_DISCOVERY_FAILED", message: error.localizedDescription, details: nil))
             return
         }
 
-        // Discover characteristics for all services
         if let services = peripheral.services {
             for service in services {
                 peripheral.discoverCharacteristics(nil, for: service)
@@ -274,18 +270,16 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        if let error = error {
-            // Non-fatal — continue looking at other services
-            return
-        }
+        let id = deviceId(for: peripheral)
+        if error != nil { return }
 
-        guard txCharacteristic == nil else { return } // Already found
+        guard txCharacteristics[id] == nil else { return } // Already found
 
         // 1. Try target service/characteristic UUIDs
-        if let targetSvc = targetServiceUUID, service.uuid == targetSvc {
+        if let targetSvc = targetServiceUUIDs[id], service.uuid == targetSvc {
             if let chars = service.characteristics {
                 for c in chars {
-                    if c.uuid == targetCharUUID && isWritable(c) {
+                    if c.uuid == targetCharUUIDs[id] && isWritable(c) {
                         selectCharacteristic(c, peripheral: peripheral)
                         return
                     }
@@ -305,37 +299,33 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     private func selectCharacteristic(_ char: CBCharacteristic, peripheral: CBPeripheral) {
-        txCharacteristic = char
-        // Prefer write-with-response for reliable backpressure; the printer
-        // ACKs each chunk before we send the next, preventing buffer overflow.
-        // Fall back to write-without-response only if that is the sole option.
-        canWriteWithoutResponse = !char.properties.contains(.write) && char.properties.contains(.writeWithoutResponse)
+        let id = deviceId(for: peripheral)
+        txCharacteristics[id] = char
+        let useWithoutResponse = !char.properties.contains(.write) && char.properties.contains(.writeWithoutResponse)
+        canWriteWithoutResponses[id] = useWithoutResponse
 
-        // Get MTU
-        let writeType: CBCharacteristicWriteType = canWriteWithoutResponse ? .withoutResponse : .withResponse
-        mtuPayload = peripheral.maximumWriteValueLength(for: writeType)
+        let writeType: CBCharacteristicWriteType = useWithoutResponse ? .withoutResponse : .withResponse
+        mtuPayloads[id] = peripheral.maximumWriteValueLength(for: writeType)
 
-        connectTimer?.invalidate()
-        connectTimer = nil
-        connectResult?(nil)
-        connectResult = nil
-        connectionStateCallback?("connected")
+        connectTimers.removeValue(forKey: id)?.invalidate()
+        connectResults.removeValue(forKey: id)?(nil)
+        connectionStateCallback?(id, "connected")
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        let id = deviceId(for: peripheral)
         if let error = error {
-            writeResult?(FlutterError(code: "WRITE_FAILED", message: error.localizedDescription, details: nil))
+            writeResults.removeValue(forKey: id)?(FlutterError(code: "WRITE_FAILED", message: error.localizedDescription, details: nil))
         } else {
-            writeResult?(nil)
+            writeResults.removeValue(forKey: id)?(nil)
         }
-        writeResult = nil
     }
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
-        guard let data = pendingWriteData, let char = txCharacteristic else { return }
-        let result = pendingWriteResult
-        pendingWriteData = nil
-        pendingWriteResult = nil
+        let id = deviceId(for: peripheral)
+        guard let data = pendingWriteDatas.removeValue(forKey: id),
+              let char = txCharacteristics[id] else { return }
+        let result = pendingWriteResults.removeValue(forKey: id)
         peripheral.writeValue(data, for: char, type: .withoutResponse)
         result?(nil)
     }

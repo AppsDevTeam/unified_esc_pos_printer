@@ -113,14 +113,24 @@ class UnifiedEscPosPrinterPlugin : FlutterPlugin, MethodCallHandler, ActivityAwa
                 val characteristicUuid = call.argument<String>("characteristicUuid")
                 bleManager.connect(deviceId, timeoutMs.toLong(), serviceUuid, characteristicUuid, result)
             }
-            "bleGetMtu" -> bleManager.getMtu(result)
-            "bleSupportsWriteWithoutResponse" -> bleManager.supportsWriteWithoutResponse(result)
+            "bleGetMtu" -> {
+                val deviceId = call.argument<String>("deviceId")!!
+                bleManager.getMtu(deviceId, result)
+            }
+            "bleSupportsWriteWithoutResponse" -> {
+                val deviceId = call.argument<String>("deviceId")!!
+                bleManager.supportsWriteWithoutResponse(deviceId, result)
+            }
             "bleWrite" -> {
+                val deviceId = call.argument<String>("deviceId")!!
                 val data = call.argument<ByteArray>("data")!!
                 val withoutResponse = call.argument<Boolean>("withoutResponse") ?: false
-                bleManager.write(data, withoutResponse, result)
+                bleManager.write(deviceId, data, withoutResponse, result)
             }
-            "bleDisconnect" -> bleManager.disconnect(result)
+            "bleDisconnect" -> {
+                val deviceId = call.argument<String>("deviceId")!!
+                bleManager.disconnect(deviceId, result)
+            }
 
             // Bluetooth Classic
             "getBondedDevices" -> bluetoothClassicManager.getBondedDevices(result)
@@ -135,10 +145,14 @@ class UnifiedEscPosPrinterPlugin : FlutterPlugin, MethodCallHandler, ActivityAwa
                 bluetoothClassicManager.connect(address, timeoutMs.toLong(), result)
             }
             "btWrite" -> {
+                val address = call.argument<String>("address")!!
                 val data = call.argument<ByteArray>("data")!!
-                bluetoothClassicManager.write(data, result)
+                bluetoothClassicManager.write(address, data, result)
             }
-            "btDisconnect" -> bluetoothClassicManager.disconnect(result)
+            "btDisconnect" -> {
+                val address = call.argument<String>("address")!!
+                bluetoothClassicManager.disconnect(address, result)
+            }
 
             else -> result.notImplemented()
         }
@@ -155,11 +169,11 @@ class ConnectionStateStreamHandler(
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         eventSink = events
-        bleManager.connectionStateCallback = { state ->
-            events?.success(mapOf("type" to "ble", "state" to state))
+        bleManager.connectionStateCallback = { deviceId, state ->
+            events?.success(mapOf("type" to "ble", "deviceId" to deviceId, "state" to state))
         }
-        btManager.connectionStateCallback = { state ->
-            events?.success(mapOf("type" to "bt", "state" to state))
+        btManager.connectionStateCallback = { address, state ->
+            events?.success(mapOf("type" to "bt", "deviceId" to address, "state" to state))
         }
     }
 

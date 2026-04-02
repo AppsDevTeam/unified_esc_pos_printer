@@ -29,6 +29,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
 
   int _mtuPayload = 20;
   bool _writeWithoutResponse = false;
+  String? _connectedDeviceId;
   StreamSubscription<Map<String, dynamic>>? _connectionSub;
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
@@ -196,9 +197,11 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
       );
     }
 
+    _connectedDeviceId = device.deviceId;
+
     // Get negotiated MTU
     try {
-      _mtuPayload = await _platform.bleGetMtu();
+      _mtuPayload = await _platform.bleGetMtu(deviceId: device.deviceId);
       PrinterLogger.debug(_tag, 'Negotiated MTU payload: $_mtuPayload bytes');
     } catch (_) {
       _mtuPayload = 20; // safe minimum
@@ -207,7 +210,9 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
 
     // Check write-without-response support
     try {
-      _writeWithoutResponse = await _platform.bleSupportsWriteWithoutResponse();
+      _writeWithoutResponse = await _platform.bleSupportsWriteWithoutResponse(
+        deviceId: device.deviceId,
+      );
       PrinterLogger.debug(
         _tag,
         'Write-without-response: $_writeWithoutResponse',
@@ -218,11 +223,14 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
 
     // Monitor for remote disconnection
     _connectionSub = _platform.connectionStateStream
-        .where((event) => event['type'] == 'ble')
+        .where((event) =>
+            event['type'] == 'ble' &&
+            event['deviceId'] == device.deviceId)
         .listen((event) {
       if (event['state'] == 'disconnected' &&
           _state != PrinterConnectionState.disconnected) {
         PrinterLogger.warning(_tag, 'Remote disconnection detected');
+        _connectedDeviceId = null;
         _setState(PrinterConnectionState.error);
         _setState(PrinterConnectionState.disconnected);
       }
@@ -239,6 +247,8 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
   Future<void> writeBytes(List<int> bytes) async {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
 
+    final String deviceId = _connectedDeviceId ?? '';
+
     _setState(PrinterConnectionState.printing);
 
     final int chunks = (bytes.length / _mtuPayload).ceil();
@@ -251,6 +261,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
       for (int i = 0; i < bytes.length; i += _mtuPayload) {
         final int end = (i + _mtuPayload).clamp(0, bytes.length);
         await _platform.bleWrite(
+          deviceId: deviceId,
           data: Uint8List.fromList(bytes.sublist(i, end)),
           withoutResponse: _writeWithoutResponse,
         );
@@ -276,7 +287,9 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     _connectionSub = null;
 
     try {
-      await _platform.bleDisconnect();
+      final String deviceId = _connectedDeviceId ?? '';
+      _connectedDeviceId = null;
+      await _platform.bleDisconnect(deviceId: deviceId);
     } finally {
       _setState(PrinterConnectionState.disconnected);
     }

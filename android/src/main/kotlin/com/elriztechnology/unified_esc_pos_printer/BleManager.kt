@@ -28,23 +28,23 @@ class BleManager(private val context: Context) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Scan state
+    // Scan state (shared — only one scan at a time)
     private var scanEventSink: EventChannel.EventSink? = null
     private val discoveredDevices = mutableListOf<Map<String, String>>()
     private var scanCallback: ScanCallback? = null
     private var scanTimeoutRunnable: Runnable? = null
 
-    // Connection state
-    private var gatt: BluetoothGatt? = null
-    private var txCharacteristic: BluetoothGattCharacteristic? = null
-    private var negotiatedMtu: Int = 20 // safe default (will be updated after MTU negotiation)
-    private var writeWithoutResponse: Boolean = false
-    private var connectResult: MethodChannel.Result? = null
-    private var writeResult: MethodChannel.Result? = null
-    private var targetServiceUuid: UUID? = null
-    private var targetCharUuid: UUID? = null
+    // Per-device connection state
+    private val gatts = mutableMapOf<String, BluetoothGatt>()
+    private val txCharacteristics = mutableMapOf<String, BluetoothGattCharacteristic>()
+    private val negotiatedMtus = mutableMapOf<String, Int>()
+    private val writeWithoutResponses = mutableMapOf<String, Boolean>()
+    private val connectResults = mutableMapOf<String, MethodChannel.Result>()
+    private val writeResults = mutableMapOf<String, MethodChannel.Result>()
+    private val targetServiceUuids = mutableMapOf<String, UUID>()
+    private val targetCharUuids = mutableMapOf<String, UUID>()
 
-    var connectionStateCallback: ((String) -> Unit)? = null
+    var connectionStateCallback: ((String, String) -> Unit)? = null
 
     val scanStreamHandler = object : EventChannel.StreamHandler {
         override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -98,7 +98,7 @@ class BleManager(private val context: Context) {
                 val id = device.address
                 if (discoveredDevices.none { it["deviceId"] == id }) {
                     val name = try { device.name } catch (_: SecurityException) { null }
-                    
+
                     discoveredDevices.add(
                         mapOf(
                             "deviceId" to id,
@@ -167,8 +167,8 @@ class BleManager(private val context: Context) {
             return
         }
 
-        targetServiceUuid = serviceUuid?.let { UUID.fromString(it) } ?: ESC_POS_SERVICE_UUID
-        targetCharUuid = characteristicUuid?.let { UUID.fromString(it) } ?: ESC_POS_TX_CHAR_UUID
+        targetServiceUuids[deviceId] = serviceUuid?.let { UUID.fromString(it) } ?: ESC_POS_SERVICE_UUID
+        targetCharUuids[deviceId] = characteristicUuid?.let { UUID.fromString(it) } ?: ESC_POS_TX_CHAR_UUID
 
         val device: BluetoothDevice
         try {
@@ -178,19 +178,19 @@ class BleManager(private val context: Context) {
             return
         }
 
-        connectResult = result
+        // Clean up any existing connection for this device
+        cleanupConnection(deviceId)
+
+        connectResults[deviceId] = result
 
         // Timeout handler
         val timeoutRunnable = Runnable {
-            if (connectResult != null) {
-                connectResult?.error("TIMEOUT", "BLE connection timed out", null)
-                connectResult = null
-                
-                try { gatt?.disconnect(); gatt?.close() } catch (_: SecurityException) {
-                    // Ignore — we're disconnecting anyway
-                }
+            val pendingResult = connectResults.remove(deviceId)
+            if (pendingResult != null) {
+                pendingResult.error("TIMEOUT", "BLE connection timed out", null)
 
-                gatt = null
+                try { gatts[deviceId]?.disconnect(); gatts[deviceId]?.close() } catch (_: SecurityException) {}
+                gatts.remove(deviceId)
             }
         }
         mainHandler.postDelayed(timeoutRunnable, timeoutMs)
@@ -198,47 +198,43 @@ class BleManager(private val context: Context) {
         val gattCallback = object : BluetoothGattCallback() {
             override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    gatt = g
+                    gatts[deviceId] = g
                     try {
                         g.requestMtu(512)
                     } catch (e: SecurityException) {
                         mainHandler.post {
                             mainHandler.removeCallbacks(timeoutRunnable)
-                            connectResult?.error("PERMISSION_DENIED", "MTU request denied", e.message)
-                            connectResult = null
+                            connectResults.remove(deviceId)?.error("PERMISSION_DENIED", "MTU request denied", e.message)
                         }
                     }
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     mainHandler.post {
                         mainHandler.removeCallbacks(timeoutRunnable)
 
-                        if (connectResult != null) {
-                            connectResult?.error("DISCONNECTED", "BLE device disconnected during setup", null)
-                            connectResult = null
+                        val pendingResult = connectResults.remove(deviceId)
+                        if (pendingResult != null) {
+                            pendingResult.error("DISCONNECTED", "BLE device disconnected during setup", null)
                         } else {
                             // Remote disconnection after fully connected
-                            connectionStateCallback?.invoke("disconnected")
+                            connectionStateCallback?.invoke(deviceId, "disconnected")
                         }
 
-                        try { g.close() } catch (_: SecurityException) {
-                            // Ignore — we're disconnecting anyway
-                        }
-                        
-                        gatt = null
-                        txCharacteristic = null
+                        try { g.close() } catch (_: SecurityException) {}
+
+                        gatts.remove(deviceId)
+                        txCharacteristics.remove(deviceId)
                     }
                 }
             }
 
             override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
-                negotiatedMtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu - 3 else 20
+                negotiatedMtus[deviceId] = if (status == BluetoothGatt.GATT_SUCCESS) mtu - 3 else 20
                 try {
                     g.discoverServices()
                 } catch (e: SecurityException) {
                     mainHandler.post {
                         mainHandler.removeCallbacks(timeoutRunnable)
-                        connectResult?.error("PERMISSION_DENIED", "Service discovery denied", e.message)
-                        connectResult = null
+                        connectResults.remove(deviceId)?.error("PERMISSION_DENIED", "Service discovery denied", e.message)
                     }
                 }
             }
@@ -247,10 +243,9 @@ class BleManager(private val context: Context) {
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     mainHandler.post {
                         mainHandler.removeCallbacks(timeoutRunnable)
-                        connectResult?.error("SERVICE_DISCOVERY_FAILED", "GATT service discovery failed with status $status", null)
-                        connectResult = null
+                        connectResults.remove(deviceId)?.error("SERVICE_DISCOVERY_FAILED", "GATT service discovery failed with status $status", null)
                         try { g.disconnect(); g.close() } catch (_: SecurityException) {}
-                        gatt = null
+                        gatts.remove(deviceId)
                     }
                     return
                 }
@@ -258,9 +253,9 @@ class BleManager(private val context: Context) {
                 var foundChar: BluetoothGattCharacteristic? = null
 
                 // 1. Try target service/characteristic UUIDs
-                val targetService = g.getService(targetServiceUuid)
+                val targetService = g.getService(targetServiceUuids[deviceId])
                 if (targetService != null) {
-                    val c = targetService.getCharacteristic(targetCharUuid)
+                    val c = targetService.getCharacteristic(targetCharUuids[deviceId])
                     if (c != null && isWritable(c)) {
                         foundChar = c
                     }
@@ -282,21 +277,19 @@ class BleManager(private val context: Context) {
                 mainHandler.post {
                     mainHandler.removeCallbacks(timeoutRunnable)
                     if (foundChar == null) {
-                        connectResult?.error("NO_CHARACTERISTIC", "No writable characteristic found", null)
-                        connectResult = null
+                        connectResults.remove(deviceId)?.error("NO_CHARACTERISTIC", "No writable characteristic found", null)
                         try { g.disconnect(); g.close() } catch (_: SecurityException) {}
-                        gatt = null
+                        gatts.remove(deviceId)
                     } else {
-                        txCharacteristic = foundChar
+                        txCharacteristics[deviceId] = foundChar
                         // Prefer write-with-response for reliable backpressure; the printer
                         // ACKs each chunk before we send the next, preventing buffer overflow.
                         // Fall back to write-without-response only if that is the sole option.
-                        writeWithoutResponse =
+                        writeWithoutResponses[deviceId] =
                             (foundChar.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) == 0 &&
                             (foundChar.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-                        connectResult?.success(null)
-                        connectResult = null
-                        connectionStateCallback?.invoke("connected")
+                        connectResults.remove(deviceId)?.success(null)
+                        connectionStateCallback?.invoke(deviceId, "connected")
                     }
                 }
             }
@@ -307,12 +300,12 @@ class BleManager(private val context: Context) {
                 status: Int
             ) {
                 mainHandler.post {
+                    val pendingResult = writeResults.remove(deviceId)
                     if (status == BluetoothGatt.GATT_SUCCESS) {
-                        writeResult?.success(null)
+                        pendingResult?.success(null)
                     } else {
-                        writeResult?.error("WRITE_FAILED", "BLE write failed with status $status", null)
+                        pendingResult?.error("WRITE_FAILED", "BLE write failed with status $status", null)
                     }
-                    writeResult = null
                 }
             }
         }
@@ -334,28 +327,28 @@ class BleManager(private val context: Context) {
             }
         } catch (e: SecurityException) {
             mainHandler.removeCallbacks(timeoutRunnable)
-            connectResult = null
+            connectResults.remove(deviceId)
             result.error("PERMISSION_DENIED", "Bluetooth connect permission denied", e.message)
         }
     }
 
-    fun getMtu(result: MethodChannel.Result) {
-        result.success(negotiatedMtu)
+    fun getMtu(deviceId: String, result: MethodChannel.Result) {
+        result.success(negotiatedMtus[deviceId] ?: 20)
     }
 
-    fun supportsWriteWithoutResponse(result: MethodChannel.Result) {
-        result.success(writeWithoutResponse)
+    fun supportsWriteWithoutResponse(deviceId: String, result: MethodChannel.Result) {
+        result.success(writeWithoutResponses[deviceId] ?: false)
     }
 
-    fun write(data: ByteArray, withoutResponse: Boolean, result: MethodChannel.Result) {
-        val g = gatt
-        val char = txCharacteristic
+    fun write(deviceId: String, data: ByteArray, withoutResponse: Boolean, result: MethodChannel.Result) {
+        val g = gatts[deviceId]
+        val char = txCharacteristics[deviceId]
         if (g == null || char == null) {
-            result.error("NOT_CONNECTED", "BLE device not connected", null)
+            result.error("NOT_CONNECTED", "BLE device not connected: $deviceId", null)
             return
         }
 
-        writeResult = result
+        writeResults[deviceId] = result
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -364,11 +357,10 @@ class BleManager(private val context: Context) {
                     BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 else
                     BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                
+
                     val writeResult = g.writeCharacteristic(char, data, writeType)
                 if (writeResult != BluetoothStatusCodes.SUCCESS) {
-                    this.writeResult?.error("WRITE_FAILED", "writeCharacteristic returned $writeResult", null)
-                    this.writeResult = null
+                    writeResults.remove(deviceId)?.error("WRITE_FAILED", "writeCharacteristic returned $writeResult", null)
                 }
             } else {
                 @Suppress("DEPRECATION")
@@ -376,49 +368,50 @@ class BleManager(private val context: Context) {
                     BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 else
                     BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                
+
                 @Suppress("DEPRECATION")
                 char.value = data
-                
+
                 @Suppress("DEPRECATION")
                 val success = g.writeCharacteristic(char)
                 if (!success) {
-                    this.writeResult?.error("WRITE_FAILED", "writeCharacteristic returned false", null)
-                    this.writeResult = null
+                    writeResults.remove(deviceId)?.error("WRITE_FAILED", "writeCharacteristic returned false", null)
                 }
             }
         } catch (e: SecurityException) {
-            writeResult?.error("PERMISSION_DENIED", "Bluetooth write permission denied", e.message)
-            writeResult = null
+            writeResults.remove(deviceId)?.error("PERMISSION_DENIED", "Bluetooth write permission denied", e.message)
         }
     }
 
-    fun disconnect(result: MethodChannel.Result) {
-        try {
-            gatt?.disconnect()
-            gatt?.close()
-        } catch (_: SecurityException) {
-            // Ignore — we're disconnecting anyway
-        }
-        
-        gatt = null
-        txCharacteristic = null
-        connectionStateCallback?.invoke("disconnected")
+    fun disconnect(deviceId: String, result: MethodChannel.Result) {
+        cleanupConnection(deviceId)
+        connectionStateCallback?.invoke(deviceId, "disconnected")
         result.success(null)
     }
 
     fun dispose() {
         stopScanInternal()
 
-        try {
-            gatt?.disconnect()
-            gatt?.close()
-        } catch (_: SecurityException) {
-            // Ignore — we're disposing anyway
+        val deviceIds = gatts.keys.toList()
+        for (deviceId in deviceIds) {
+            cleanupConnection(deviceId)
         }
-        
-        gatt = null
-        txCharacteristic = null
+    }
+
+    private fun cleanupConnection(deviceId: String) {
+        try {
+            gatts[deviceId]?.disconnect()
+            gatts[deviceId]?.close()
+        } catch (_: SecurityException) {}
+
+        gatts.remove(deviceId)
+        txCharacteristics.remove(deviceId)
+        negotiatedMtus.remove(deviceId)
+        writeWithoutResponses.remove(deviceId)
+        connectResults.remove(deviceId)
+        writeResults.remove(deviceId)
+        targetServiceUuids.remove(deviceId)
+        targetCharUuids.remove(deviceId)
     }
 
     private fun isWritable(c: BluetoothGattCharacteristic): Boolean {

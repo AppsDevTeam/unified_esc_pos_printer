@@ -72,31 +72,37 @@ class BluetoothPlatformChannel {
   }
 
   /// Returns the negotiated MTU payload size (already minus ATT overhead).
-  Future<int> bleGetMtu() async {
-    return await _method.invokeMethod<int>('bleGetMtu') ?? 20;
+  Future<int> bleGetMtu({required String deviceId}) async {
+    return await _method.invokeMethod<int>('bleGetMtu', {
+      'deviceId': deviceId,
+    }) ?? 20;
   }
 
   /// Returns whether the connected characteristic supports write-without-response.
-  Future<bool> bleSupportsWriteWithoutResponse() async {
-    return await _method
-            .invokeMethod<bool>('bleSupportsWriteWithoutResponse') ??
-        false;
+  Future<bool> bleSupportsWriteWithoutResponse({required String deviceId}) async {
+    return await _method.invokeMethod<bool>('bleSupportsWriteWithoutResponse', {
+      'deviceId': deviceId,
+    }) ?? false;
   }
 
   /// Write a single chunk of data to the connected BLE characteristic.
   Future<void> bleWrite({
+    required String deviceId,
     required Uint8List data,
     required bool withoutResponse,
   }) async {
     await _method.invokeMethod('bleWrite', {
+      'deviceId': deviceId,
       'data': data,
       'withoutResponse': withoutResponse,
     });
   }
 
-  /// Disconnect the current BLE connection.
-  Future<void> bleDisconnect() async {
-    await _method.invokeMethod('bleDisconnect');
+  /// Disconnect the BLE connection for the given device.
+  Future<void> bleDisconnect({required String deviceId}) async {
+    await _method.invokeMethod('bleDisconnect', {
+      'deviceId': deviceId,
+    });
   }
 
   /// Get paired/bonded BLE devices. Returns list of device maps
@@ -153,20 +159,29 @@ class BluetoothPlatformChannel {
     });
   }
 
-  /// Write data to the connected Classic Bluetooth device.
-  Future<void> btWrite({required Uint8List data}) async {
-    await _method.invokeMethod('btWrite', {'data': data});
+  /// Write data to the Classic Bluetooth device identified by [address].
+  Future<void> btWrite({
+    required String address,
+    required Uint8List data,
+  }) async {
+    await _method.invokeMethod('btWrite', {
+      'address': address,
+      'data': data,
+    });
   }
 
-  /// Disconnect the current Classic Bluetooth connection.
-  Future<void> btDisconnect() async {
-    await _method.invokeMethod('btDisconnect');
+  /// Disconnect the Classic Bluetooth connection for the given [address].
+  Future<void> btDisconnect({required String address}) async {
+    await _method.invokeMethod('btDisconnect', {
+      'address': address,
+    });
   }
 
   // Connection
 
   /// Stream of connection state events. Each event is a map with:
   /// - `type`: `"ble"` or `"bt"`
+  /// - `deviceId`: the device identifier (MAC address or UUID)
   /// - `state`: `"connected"` or `"disconnected"`
   Stream<Map<String, dynamic>> get connectionStateStream {
     return _connectionStateEvent.receiveBroadcastStream().map((event) {

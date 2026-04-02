@@ -37,12 +37,12 @@ class BluetoothClassicManager(private val context: Context) {
     private var discoveryReceiver: BroadcastReceiver? = null
     private var discoveryTimeoutRunnable: Runnable? = null
 
-    // Connection state
-    private var socket: BluetoothSocket? = null
-    private var outputStream: OutputStream? = null
-    private var inputThread: Thread? = null
+    // Per-device connection state
+    private val sockets = mutableMapOf<String, BluetoothSocket>()
+    private val outputStreams = mutableMapOf<String, OutputStream>()
+    private val inputThreads = mutableMapOf<String, Thread>()
 
-    var connectionStateCallback: ((String) -> Unit)? = null
+    var connectionStateCallback: ((String, String) -> Unit)? = null
 
     val scanStreamHandler = object : EventChannel.StreamHandler {
         override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -98,14 +98,14 @@ class BluetoothClassicManager(private val context: Context) {
                             val address = it.address
                             if (discoveredDevices.none { d -> d["address"] == address }) {
                                 val name = try { it.name } catch (_: SecurityException) { null }
-                                
+
                                 discoveredDevices.add(
                                     mapOf(
                                         "name" to (name ?: address),
                                         "address" to address
                                     )
                                 )
-                                
+
                                 mainHandler.post {
                                     scanEventSink?.success(discoveredDevices.toList())
                                 }
@@ -180,6 +180,9 @@ class BluetoothClassicManager(private val context: Context) {
             return
         }
 
+        // Clean up any existing connection for this address
+        cleanupConnection(address)
+
         // Connect on a background thread to avoid blocking the UI
         Thread {
             try {
@@ -210,11 +213,11 @@ class BluetoothClassicManager(private val context: Context) {
                     }
                 }
 
-                socket = sock
-                outputStream = sock.outputStream
+                sockets[address] = sock
+                outputStreams[address] = sock.outputStream
 
                 // Monitor for remote disconnection
-                inputThread = Thread {
+                val monitorThread = Thread {
                     try {
                         val inputStream = sock.inputStream
                         val buffer = ByteArray(1024)
@@ -228,18 +231,19 @@ class BluetoothClassicManager(private val context: Context) {
                         // Connection lost
                     }
                     mainHandler.post {
-                        if (socket != null) {
-                            cleanupConnection()
-                            connectionStateCallback?.invoke("disconnected")
+                        if (sockets.containsKey(address)) {
+                            cleanupConnection(address)
+                            connectionStateCallback?.invoke(address, "disconnected")
                         }
                     }
                 }
 
-                inputThread?.isDaemon = true
-                inputThread?.start()
+                monitorThread.isDaemon = true
+                monitorThread.start()
+                inputThreads[address] = monitorThread
 
                 mainHandler.post {
-                    connectionStateCallback?.invoke("connected")
+                    connectionStateCallback?.invoke(address, "connected")
                     result.success(null)
                 }
             } catch (e: SecurityException) {
@@ -254,10 +258,10 @@ class BluetoothClassicManager(private val context: Context) {
         }.start()
     }
 
-    fun write(data: ByteArray, result: MethodChannel.Result) {
-        val os = outputStream
+    fun write(address: String, data: ByteArray, result: MethodChannel.Result) {
+        val os = outputStreams[address]
         if (os == null) {
-            result.error("NOT_CONNECTED", "Bluetooth Classic not connected", null)
+            result.error("NOT_CONNECTED", "Bluetooth Classic not connected to $address", null)
             return
         }
 
@@ -270,23 +274,23 @@ class BluetoothClassicManager(private val context: Context) {
         }
     }
 
-    fun disconnect(result: MethodChannel.Result) {
-        cleanupConnection()
-        connectionStateCallback?.invoke("disconnected")
+    fun disconnect(address: String, result: MethodChannel.Result) {
+        cleanupConnection(address)
+        connectionStateCallback?.invoke(address, "disconnected")
         result.success(null)
     }
 
     fun dispose() {
         stopDiscoveryInternal()
-        cleanupConnection()
+        val addresses = sockets.keys.toList()
+        for (address in addresses) {
+            cleanupConnection(address)
+        }
     }
 
-    private fun cleanupConnection() {
-        inputThread?.interrupt()
-        inputThread = null
-        try { outputStream?.close() } catch (_: IOException) {}
-        outputStream = null
-        try { socket?.close() } catch (_: IOException) {}
-        socket = null
+    private fun cleanupConnection(address: String) {
+        inputThreads.remove(address)?.interrupt()
+        try { outputStreams.remove(address)?.close() } catch (_: IOException) {}
+        try { sockets.remove(address)?.close() } catch (_: IOException) {}
     }
 }

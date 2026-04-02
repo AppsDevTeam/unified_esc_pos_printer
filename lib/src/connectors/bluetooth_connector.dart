@@ -32,6 +32,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
   final int chunkSize;
 
   final BluetoothPlatformChannel _platform = BluetoothPlatformChannel.instance;
+  String? _connectedAddress;
   StreamSubscription<Map<String, dynamic>>? _connectionSub;
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
@@ -216,16 +217,22 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
 
       // Send ESC @ to initialise the printer.
       await _platform.btWrite(
+        address: device.address,
         data: Uint8List.fromList(cInit.codeUnits),
       );
 
+      _connectedAddress = device.address;
+
       // Monitor for remote disconnection.
       _connectionSub = _platform.connectionStateStream
-          .where((event) => event['type'] == 'bt')
+          .where((event) =>
+              event['type'] == 'bt' &&
+              event['deviceId'] == device.address)
           .listen((event) {
         if (event['state'] == 'disconnected' &&
             _state != PrinterConnectionState.disconnected) {
           PrinterLogger.warning(_tag, 'Remote disconnection detected');
+          _connectedAddress = null;
           _connectionSub?.cancel();
           _connectionSub = null;
           _setState(PrinterConnectionState.error);
@@ -265,6 +272,8 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
     _setState(PrinterConnectionState.printing);
 
+    final String address = _connectedAddress ?? '';
+
     final int chunks = (bytes.length / chunkSize).ceil();
     PrinterLogger.debug(
       _tag,
@@ -275,6 +284,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       for (int i = 0; i < bytes.length; i += chunkSize) {
         final int end = (i + chunkSize).clamp(0, bytes.length);
         await _platform.btWrite(
+          address: address,
           data: Uint8List.fromList(bytes.sublist(i, end)),
         );
       }
@@ -301,7 +311,9 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     _connectionSub = null;
 
     try {
-      await _platform.btDisconnect();
+      final String address = _connectedAddress ?? '';
+      _connectedAddress = null;
+      await _platform.btDisconnect(address: address);
     } finally {
       _setState(PrinterConnectionState.disconnected);
     }

@@ -76,15 +76,19 @@ public class UnifiedEscPosPrinterPlugin: NSObject, FlutterPlugin {
                 result: result
             )
         case "bleGetMtu":
-            bleManager?.getMtu(result: result)
+            let deviceId = args?["deviceId"] as? String ?? ""
+            bleManager?.getMtu(deviceId: deviceId, result: result)
         case "bleSupportsWriteWithoutResponse":
-            bleManager?.supportsWriteWithoutResponse(result: result)
+            let deviceId = args?["deviceId"] as? String ?? ""
+            bleManager?.supportsWriteWithoutResponse(deviceId: deviceId, result: result)
         case "bleWrite":
+            let deviceId = args?["deviceId"] as? String ?? ""
             let data = (args?["data"] as? FlutterStandardTypedData)?.data ?? Data()
             let withoutResponse = args?["withoutResponse"] as? Bool ?? false
-            bleManager?.write(data: data, withoutResponse: withoutResponse, result: result)
+            bleManager?.write(deviceId: deviceId, data: data, withoutResponse: withoutResponse, result: result)
         case "bleDisconnect":
-            bleManager?.disconnect(result: result)
+            let deviceId = args?["deviceId"] as? String ?? ""
+            bleManager?.disconnect(deviceId: deviceId, result: result)
 
         // Bluetooth Classic — not supported on iOS
         case "getBondedDevices":
@@ -108,9 +112,9 @@ class ConnectionStateStreamHandler: NSObject, FlutterStreamHandler {
     }
 
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-        bleManager.connectionStateCallback = { state in
+        bleManager.connectionStateCallback = { deviceId, state in
             DispatchQueue.main.async {
-                events(["type": "ble", "state": state])
+                events(["type": "ble", "deviceId": deviceId, "state": state])
             }
         }
         return nil
