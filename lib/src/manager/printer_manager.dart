@@ -60,6 +60,11 @@ class PrinterManager {
   final StreamController<PrinterConnectionState> _stateController =
       StreamController<PrinterConnectionState>.broadcast();
 
+  /// Active scan subscriptions created by [scanAll], tracked so
+  /// [stopAllScans] can cancel them.
+  final List<StreamSubscription<dynamic>> _scanSubscriptions = [];
+  StreamController<List<PrinterDevice>>? _scanController;
+
   /// Scan for all printer types simultaneously, returning a merged stream.
   ///
   /// Each emission is the latest accumulated list for each connector type;
@@ -77,8 +82,13 @@ class PrinterManager {
     },
   }) {
     PrinterLogger.info(_tag, 'Starting scan for types: $types');
+
+    // Cancel any previous scan that is still in progress.
+    _stopScansSync();
+
     final StreamController<List<PrinterDevice>> controller =
         StreamController<List<PrinterDevice>>();
+    _scanController = controller;
 
     final Map<PrinterConnectionType, List<PrinterDevice>> buckets = {};
 
@@ -96,7 +106,7 @@ class PrinterManager {
       Stream<List<T>> stream,
     ) {
       pending++;
-      stream.listen(
+      final StreamSubscription<List<T>> sub = stream.listen(
         (devices) {
           buckets[type] = devices;
           emit();
@@ -113,6 +123,7 @@ class PrinterManager {
         },
         cancelOnError: false,
       );
+      _scanSubscriptions.add(sub);
     }
 
     if (types.contains(PrinterConnectionType.network)) {
@@ -255,9 +266,24 @@ class PrinterManager {
   /// The device currently connected to, or null if not connected.
   PrinterDevice? get connectedDevice => _activeDevice;
 
+  /// Stop all in-progress scans started by [scanAll] or [scanPrinters].
+  ///
+  /// Safe to call even when no scan is running.
+  Future<void> stopAllScans() async {
+    _stopScansSync();
+    await Future.wait([
+      _network.stopScan(),
+      _ble.stopScan(),
+      _bluetooth.stopScan(),
+      _usb.stopScan(),
+    ]);
+    PrinterLogger.info(_tag, 'All scans stopped');
+  }
+
   /// Disconnect and release all connector resources.
   Future<void> dispose() async {
     PrinterLogger.debug(_tag, 'Disposing');
+    await stopAllScans();
     await disconnect();
     await _stateController.close();
     await _network.dispose();
@@ -267,6 +293,20 @@ class PrinterManager {
   }
 
   // Helpers
+
+  /// Cancel tracked Dart-side scan subscriptions and close the scan controller.
+  void _stopScansSync() {
+    for (final StreamSubscription<dynamic> sub in _scanSubscriptions) {
+      sub.cancel();
+    }
+    _scanSubscriptions.clear();
+
+    if (_scanController != null && !_scanController!.isClosed) {
+      _scanController!.close();
+    }
+    _scanController = null;
+  }
+
   PrinterConnector<PrinterDevice> _connectorFor(PrinterDevice device) {
     return switch (device) {
       NetworkPrinterDevice() => _network as PrinterConnector<PrinterDevice>,

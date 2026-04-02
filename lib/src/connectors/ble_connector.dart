@@ -87,55 +87,62 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     StreamSubscription<List<Map<String, dynamic>>>? scanSub;
 
     try {
-      await _platform.startBleScan(
-        timeoutMs: timeout.inMilliseconds,
-      );
-    } catch (e) {
-      PrinterLogger.error(_tag, 'Failed to start BLE scan: $e');
-      _setState(PrinterConnectionState.disconnected);
+      try {
+        await _platform.startBleScan(
+          timeoutMs: timeout.inMilliseconds,
+        );
+      } catch (e) {
+        PrinterLogger.error(_tag, 'Failed to start BLE scan: $e');
+        _setState(PrinterConnectionState.disconnected);
 
-      if (found.isNotEmpty) return;
+        if (found.isNotEmpty) return;
 
-      throw PrinterScanException('Failed to start BLE scan', cause: e);
-    }
+        throw PrinterScanException('Failed to start BLE scan', cause: e);
+      }
 
-    scanSub = _platform.bleScanResults.listen(
-      (devices) {
-        for (final Map<String, dynamic> d in devices) {
-          final String id = d['deviceId'] as String;
-          if (!found.any((dev) => dev.deviceId == id)) {
-            final String name = (d['name'] as String?) ?? id;
-            PrinterLogger.debug(_tag, 'Discovered: $name ($id)');
-            found.add(BlePrinterDevice(
-              name: name,
-              deviceId: id,
-            ));
+      scanSub = _platform.bleScanResults.listen(
+        (devices) {
+          for (final Map<String, dynamic> d in devices) {
+            final String id = d['deviceId'] as String;
+            if (!found.any((dev) => dev.deviceId == id)) {
+              final String name = (d['name'] as String?) ?? id;
+              PrinterLogger.debug(_tag, 'Discovered: $name ($id)');
+              found.add(BlePrinterDevice(
+                name: name,
+                deviceId: id,
+              ));
+            }
           }
+        },
+        onError: (e) {
+          if (!scanDone.isCompleted) scanDone.complete();
+        },
+        onDone: () {
+          if (!scanDone.isCompleted) scanDone.complete();
+        },
+      );
+
+      // Wait for scan timeout
+      await Future.any([
+        scanDone.future,
+        Future.delayed(timeout),
+      ]);
+
+      if (found.isNotEmpty) yield found;
+    } finally {
+      if (scanSub != null) {
+        try {
+          await scanSub.cancel();
+        } on PlatformException catch (_) {
+          // Native stream may already be deactivated after scan timeout.
         }
-      },
-      onError: (e) {
-        if (!scanDone.isCompleted) scanDone.complete();
-      },
-      onDone: () {
-        if (!scanDone.isCompleted) scanDone.complete();
-      },
-    );
-
-    // Wait for scan timeout
-    await Future.any([
-      scanDone.future,
-      Future.delayed(timeout),
-    ]);
-
-    try {
-      await scanSub.cancel();
-    } on PlatformException catch (_) {
-      // Native stream may already be deactivated after scan timeout.
+      }
+      PrinterLogger.info(
+        _tag,
+        'Scan complete — found ${found.length} device(s)',
+      );
+      _setState(PrinterConnectionState.disconnected);
     }
-    PrinterLogger.info(_tag, 'Scan complete — found ${found.length} device(s)');
-    _setState(PrinterConnectionState.disconnected);
-
-    if (found.isNotEmpty) yield found;
   }
 
   @override

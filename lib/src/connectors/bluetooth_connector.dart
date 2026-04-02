@@ -101,59 +101,62 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     StreamSubscription<List<Map<String, dynamic>>>? discoverySub;
 
     try {
-      await _platform.startBtDiscovery(
-        timeoutMs: timeout.inMilliseconds,
-      );
-    } catch (e) {
-      PrinterLogger.error(_tag, 'Failed to start discovery: $e');
-      _setState(PrinterConnectionState.disconnected);
+      try {
+        await _platform.startBtDiscovery(
+          timeoutMs: timeout.inMilliseconds,
+        );
+      } catch (e) {
+        PrinterLogger.error(_tag, 'Failed to start discovery: $e');
+        _setState(PrinterConnectionState.disconnected);
 
-      if (found.isNotEmpty) return;
+        if (found.isNotEmpty) return;
 
-      throw PrinterScanException('Failed to start BT discovery', cause: e);
-    }
+        throw PrinterScanException('Failed to start BT discovery', cause: e);
+      }
 
-    discoverySub = _platform.btDiscoveryResults.listen(
-      (devices) {
-        for (final Map<String, dynamic> d in devices) {
-          final String addr = d['address'] as String;
-          if (!found.any((dev) => dev.address == addr)) {
-            final String name = (d['name'] as String?) ?? addr;
-            PrinterLogger.debug(_tag, 'Discovered: $name ($addr)');
-            found.add(BluetoothPrinterDevice(
-              name: name,
-              address: addr,
-            ));
+      discoverySub = _platform.btDiscoveryResults.listen(
+        (devices) {
+          for (final Map<String, dynamic> d in devices) {
+            final String addr = d['address'] as String;
+            if (!found.any((dev) => dev.address == addr)) {
+              final String name = (d['name'] as String?) ?? addr;
+              PrinterLogger.debug(_tag, 'Discovered: $name ($addr)');
+              found.add(BluetoothPrinterDevice(
+                name: name,
+                address: addr,
+              ));
+            }
           }
+        },
+        onDone: () {
+          if (!discoveryDone.isCompleted) discoveryDone.complete();
+        },
+        onError: (_) {
+          if (!discoveryDone.isCompleted) discoveryDone.complete();
+        },
+      );
+
+      // Race between discovery completing and timeout.
+      await Future.any([
+        discoveryDone.future,
+        Future.delayed(timeout),
+      ]);
+
+      if (found.isNotEmpty) yield List<BluetoothPrinterDevice>.from(found);
+    } finally {
+      if (discoverySub != null) {
+        try {
+          await discoverySub.cancel();
+        } on PlatformException catch (_) {
+          // Native stream may already be deactivated after discovery timeout.
         }
-      },
-      onDone: () {
-        if (!discoveryDone.isCompleted) discoveryDone.complete();
-      },
-      onError: (_) {
-        if (!discoveryDone.isCompleted) discoveryDone.complete();
-      },
-    );
-
-    // Race between discovery completing and timeout.
-    await Future.any([
-      discoveryDone.future,
-      Future.delayed(timeout),
-    ]);
-
-    try {
-      await discoverySub.cancel();
-    } on PlatformException catch (_) {
-      // Native stream may already be deactivated after discovery timeout.
+      }
+      PrinterLogger.info(
+        _tag,
+        'Scan complete — found ${found.length} device(s)',
+      );
+      _setState(PrinterConnectionState.disconnected);
     }
-
-    PrinterLogger.info(
-      _tag,
-      'Scan complete — found ${found.length} device(s)',
-    );
-    _setState(PrinterConnectionState.disconnected);
-
-    if (found.isNotEmpty) yield List<BluetoothPrinterDevice>.from(found);
   }
 
   @override
