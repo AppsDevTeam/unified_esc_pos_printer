@@ -136,4 +136,4 @@ const int kDefaultBaudRate = 115200;
 const int kScanSubnetTimeoutMs = 500;
 
 /// Default chunk size for Bluetooth Classic writes (bytes)
-const int kDefaultBtChunkSize = 512;
+const int kDefaultBtChunkSize = 16 * 1024;

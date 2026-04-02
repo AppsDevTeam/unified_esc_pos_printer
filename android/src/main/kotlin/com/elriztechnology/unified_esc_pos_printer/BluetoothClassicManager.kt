@@ -261,17 +261,13 @@ class BluetoothClassicManager(private val context: Context) {
             return
         }
 
-        Thread {
-            try {
-                os.write(data)
-                os.flush()
-                mainHandler.post { result.success(null) }
-            } catch (e: IOException) {
-                mainHandler.post {
-                    result.error("WRITE_FAILED", "Bluetooth Classic write failed", e.message)
-                }
-            }
-        }.start()
+        try {
+            os.write(data)
+            os.flush()
+            result.success(null)
+        } catch (e: IOException) {
+            result.error("WRITE_FAILED", "Bluetooth Classic write failed", e.message)
+        }
     }
 
     fun disconnect(result: MethodChannel.Result) {
