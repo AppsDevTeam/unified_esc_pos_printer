@@ -110,11 +110,20 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
       return;
     }
 
+    // Stop any running scan — BT adapter can't scan and connect simultaneously.
+    if (_scanning) {
+      await _scanner.stopAllScans();
+      setState(() => _scanning = false);
+      // Give the BT adapter time to release scan resources before connecting.
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+
     setState(() => _printing = true);
 
     // Build ticket once, share bytes across all printers.
     final Ticket ticket = await buildTestTicket(_selectedParts);
     final List<int> ticketBytes = ticket.bytes;
+    debugPrint('Ticket size: ${ticketBytes.length} bytes');
 
     // Print to all selected printers in parallel.
     final List<Future<void>> jobs = targets.map((_DeviceEntry entry) async {
@@ -122,18 +131,20 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
           PrinterManager(logLevel: PrinterLogLevel.debug);
 
       try {
-        setState(() => entry.status = _DeviceStatus.connecting);
+        if (mounted) setState(() => entry.status = _DeviceStatus.connecting);
         await manager.connect(entry.device);
 
-        setState(() => entry.status = _DeviceStatus.printing);
+        if (mounted) setState(() => entry.status = _DeviceStatus.printing);
         await manager.printBytes(ticketBytes);
 
-        setState(() => entry.status = _DeviceStatus.done);
+        if (mounted) setState(() => entry.status = _DeviceStatus.done);
       } catch (e) {
-        setState(() {
-          entry.status = _DeviceStatus.error;
-          entry.errorMessage = e.toString();
-        });
+        if (mounted) {
+          setState(() {
+            entry.status = _DeviceStatus.error;
+            entry.errorMessage = e.toString();
+          });
+        }
       } finally {
         try {
           await manager.disconnect();
