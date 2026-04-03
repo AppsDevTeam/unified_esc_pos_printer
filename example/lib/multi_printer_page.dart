@@ -271,7 +271,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
                       final _DeviceEntry entry = _entries[i];
                       return CheckboxListTile(
                         value: entry.selected,
-                        onChanged: _printing
+                        onChanged: _scanning || _printing
                             ? null
                             : (bool? v) =>
                                 setState(() => entry.selected = v ?? false),
