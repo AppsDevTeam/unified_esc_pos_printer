@@ -311,9 +311,11 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     _connectionSub = null;
 
     try {
-      final String address = _connectedAddress ?? '';
+      final String? address = _connectedAddress;
       _connectedAddress = null;
-      await _platform.btDisconnect(address: address);
+      if (address != null) {
+        await _platform.btDisconnect(address: address);
+      }
     } finally {
       _setState(PrinterConnectionState.disconnected);
     }

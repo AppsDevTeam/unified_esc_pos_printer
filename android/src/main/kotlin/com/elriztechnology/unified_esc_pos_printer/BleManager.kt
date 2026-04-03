@@ -44,6 +44,9 @@ class BleManager(private val context: Context) {
     private val targetServiceUuids = mutableMapOf<String, UUID>()
     private val targetCharUuids = mutableMapOf<String, UUID>()
 
+    @Volatile
+    private var disposed = false
+
     var connectionStateCallback: ((String, String) -> Unit)? = null
 
     val scanStreamHandler = object : EventChannel.StreamHandler {
@@ -197,6 +200,7 @@ class BleManager(private val context: Context) {
 
         val gattCallback = object : BluetoothGattCallback() {
             override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+                if (disposed) return
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     gatts[deviceId] = g
                     try {
@@ -228,6 +232,7 @@ class BleManager(private val context: Context) {
             }
 
             override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+                if (disposed) return
                 negotiatedMtus[deviceId] = if (status == BluetoothGatt.GATT_SUCCESS) mtu - 3 else 20
                 try {
                     g.discoverServices()
@@ -240,6 +245,7 @@ class BleManager(private val context: Context) {
             }
 
             override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+                if (disposed) return
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     mainHandler.post {
                         mainHandler.removeCallbacks(timeoutRunnable)
@@ -299,6 +305,7 @@ class BleManager(private val context: Context) {
                 characteristic: BluetoothGattCharacteristic,
                 status: Int
             ) {
+                if (disposed) return
                 mainHandler.post {
                     val pendingResult = writeResults.remove(deviceId)
                     if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -390,6 +397,7 @@ class BleManager(private val context: Context) {
     }
 
     fun dispose() {
+        disposed = true
         stopScanInternal()
 
         val deviceIds = gatts.keys.toList()

@@ -287,9 +287,11 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     _connectionSub = null;
 
     try {
-      final String deviceId = _connectedDeviceId ?? '';
+      final String? deviceId = _connectedDeviceId;
       _connectedDeviceId = null;
-      await _platform.bleDisconnect(deviceId: deviceId);
+      if (deviceId != null) {
+        await _platform.bleDisconnect(deviceId: deviceId);
+      }
     } finally {
       _setState(PrinterConnectionState.disconnected);
     }

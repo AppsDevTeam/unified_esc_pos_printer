@@ -16,6 +16,7 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.IOException
 import java.io.OutputStream
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class BluetoothClassicManager(private val context: Context) {
 
@@ -37,10 +38,11 @@ class BluetoothClassicManager(private val context: Context) {
     private var discoveryReceiver: BroadcastReceiver? = null
     private var discoveryTimeoutRunnable: Runnable? = null
 
-    // Per-device connection state
-    private val sockets = mutableMapOf<String, BluetoothSocket>()
-    private val outputStreams = mutableMapOf<String, OutputStream>()
-    private val inputThreads = mutableMapOf<String, Thread>()
+    // Per-device connection state (ConcurrentHashMap because connect() runs
+    // on a background thread while write()/disconnect() run on the main thread)
+    private val sockets = ConcurrentHashMap<String, BluetoothSocket>()
+    private val outputStreams = ConcurrentHashMap<String, OutputStream>()
+    private val inputThreads = ConcurrentHashMap<String, Thread>()
 
     var connectionStateCallback: ((String, String) -> Unit)? = null
 
