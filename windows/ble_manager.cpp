@@ -260,11 +260,14 @@ void BleManager::Connect(
     bt_address = (bt_address << 8) | std::stoul(byte_str, nullptr, 16);
   }
 
+  // Clean up any existing connection for this device
+  CleanupConnection(device_id);
+
   // Run connection on a background thread (WinRT async)
   auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
       result.release());
 
-  std::thread([this, bt_address, target_svc, target_char, timeout_ms, shared_result]() {
+  std::thread([this, device_id, bt_address, target_svc, target_char, timeout_ms, shared_result]() {
     try {
       auto device = BluetoothLEDevice::FromBluetoothAddressAsync(bt_address).get();
       if (device == nullptr) {
@@ -274,17 +277,15 @@ void BleManager::Connect(
         return;
       }
 
-      device_ = device;
-
       // Monitor connection status
-      connection_status_token_ = device.ConnectionStatusChanged(
-          [this](BluetoothLEDevice const& dev, auto const&) {
+      auto connection_status_token = device.ConnectionStatusChanged(
+          [this, device_id](BluetoothLEDevice const& dev, auto const&) {
             if (dev.ConnectionStatus() == BluetoothConnectionStatus::Disconnected) {
-              Cleanup();
+              CleanupConnection(device_id);
               if (dispatcher_ && connection_state_callback) {
-                dispatcher_->Post([this]() {
+                dispatcher_->Post([this, device_id]() {
                   if (connection_state_callback) {
-                    connection_state_callback("disconnected");
+                    connection_state_callback(device_id, "disconnected");
                   }
                 });
               }
@@ -292,11 +293,11 @@ void BleManager::Connect(
           });
 
       // Open GATT session for MTU
-      auto device_id = device.BluetoothDeviceId();
-      gatt_session_ = GattSession::FromDeviceIdAsync(device_id).get();
-      gatt_session_.MaintainConnection(true);
-      mtu_payload_ = static_cast<int>(gatt_session_.MaxPduSize()) - 3;
-      if (mtu_payload_ < 20) mtu_payload_ = 20;
+      auto ble_device_id = device.BluetoothDeviceId();
+      auto gatt_session = GattSession::FromDeviceIdAsync(ble_device_id).get();
+      gatt_session.MaintainConnection(true);
+      int mtu_payload = static_cast<int>(gatt_session.MaxPduSize()) - 3;
+      if (mtu_payload < 20) mtu_payload = 20;
 
       // Discover services
       auto services_result = device.GetGattServicesAsync().get();
@@ -358,23 +359,32 @@ void BleManager::Connect(
         return;
       }
 
-      tx_characteristic_ = found_char;
       auto props = found_char.CharacteristicProperties();
-      // Prefer write-with-response for reliable backpressure (printer ACKs
-      // each chunk).  Fall back to write-without-response only when that is
-      // the sole option — matches the Android / iOS logic.
       bool has_write =
           (props & GattCharacteristicProperties::Write) ==
           GattCharacteristicProperties::Write;
       bool has_write_no_resp =
           (props & GattCharacteristicProperties::WriteWithoutResponse) ==
           GattCharacteristicProperties::WriteWithoutResponse;
-      write_without_response_ = !has_write && has_write_no_resp;
+      bool write_without_response = !has_write && has_write_no_resp;
 
-      dispatcher_->Post([this, shared_result]() {
+      // Store per-device connection state
+      {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        DeviceConnection conn;
+        conn.device = device;
+        conn.tx_characteristic = found_char;
+        conn.gatt_session = gatt_session;
+        conn.mtu_payload = mtu_payload;
+        conn.write_without_response = write_without_response;
+        conn.connection_status_token = connection_status_token;
+        connections_[device_id] = conn;
+      }
+
+      dispatcher_->Post([this, device_id, shared_result]() {
         shared_result->Success(flutter::EncodableValue());
         if (connection_state_callback) {
-          connection_state_callback("connected");
+          connection_state_callback(device_id, "connected");
         }
       });
     } catch (const winrt::hresult_error& e) {
@@ -394,28 +404,42 @@ void BleManager::Connect(
 // ── MTU & Characteristic Info ────────────────────────────────────────────
 
 void BleManager::GetMtu(
+    const std::string& device_id,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  result->Success(flutter::EncodableValue(mtu_payload_));
+  std::lock_guard<std::mutex> lock(connection_mutex_);
+  auto it = connections_.find(device_id);
+  int mtu = (it != connections_.end()) ? it->second.mtu_payload : 20;
+  result->Success(flutter::EncodableValue(mtu));
 }
 
 void BleManager::SupportsWriteWithoutResponse(
+    const std::string& device_id,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  result->Success(flutter::EncodableValue(write_without_response_));
+  std::lock_guard<std::mutex> lock(connection_mutex_);
+  auto it = connections_.find(device_id);
+  bool val = (it != connections_.end()) ? it->second.write_without_response : false;
+  result->Success(flutter::EncodableValue(val));
 }
 
 // ── Writing ──────────────────────────────────────────────────────────────
 
 void BleManager::Write(
+    const std::string& device_id,
     const std::vector<uint8_t>& data, bool without_response,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  if (tx_characteristic_ == nullptr) {
-    result->Error("NOT_CONNECTED", "BLE device not connected");
-    return;
+  GattCharacteristic char_copy{nullptr};
+  {
+    std::lock_guard<std::mutex> lock(connection_mutex_);
+    auto it = connections_.find(device_id);
+    if (it == connections_.end() || it->second.tx_characteristic == nullptr) {
+      result->Error("NOT_CONNECTED", "BLE device not connected: " + device_id);
+      return;
+    }
+    char_copy = it->second.tx_characteristic;
   }
 
   auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
       result.release());
-  auto char_copy = tx_characteristic_;
 
   std::thread([this, data, without_response, shared_result, char_copy]() {
     try {
@@ -455,34 +479,49 @@ void BleManager::Write(
 // ── Disconnection ────────────────────────────────────────────────────────
 
 void BleManager::Disconnect(
+    const std::string& device_id,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  Cleanup();
+  CleanupConnection(device_id);
   if (connection_state_callback) {
-    connection_state_callback("disconnected");
+    connection_state_callback(device_id, "disconnected");
   }
   result->Success(flutter::EncodableValue());
 }
 
 void BleManager::Dispose() {
   StopScanInternal();
-  Cleanup();
+
+  std::vector<std::string> device_ids;
+  {
+    std::lock_guard<std::mutex> lock(connection_mutex_);
+    for (const auto& pair : connections_) {
+      device_ids.push_back(pair.first);
+    }
+  }
+  for (const auto& id : device_ids) {
+    CleanupConnection(id);
+  }
 }
 
-void BleManager::Cleanup() {
-  tx_characteristic_ = nullptr;
-  if (gatt_session_ != nullptr) {
-    try { gatt_session_.Close(); } catch (...) {}
-    gatt_session_ = nullptr;
+void BleManager::CleanupConnection(const std::string& device_id) {
+  std::lock_guard<std::mutex> lock(connection_mutex_);
+  auto it = connections_.find(device_id);
+  if (it == connections_.end()) return;
+
+  auto& conn = it->second;
+  conn.tx_characteristic = nullptr;
+  if (conn.gatt_session != nullptr) {
+    try { conn.gatt_session.Close(); } catch (...) {}
+    conn.gatt_session = nullptr;
   }
-  if (device_ != nullptr) {
+  if (conn.device != nullptr) {
     try {
-      device_.ConnectionStatusChanged(connection_status_token_);
-      device_.Close();
+      conn.device.ConnectionStatusChanged(conn.connection_status_token);
+      conn.device.Close();
     } catch (...) {}
-    device_ = nullptr;
+    conn.device = nullptr;
   }
-  mtu_payload_ = 20;
-  write_without_response_ = false;
+  connections_.erase(it);
 }
 
 }  // namespace unified_esc_pos_printer

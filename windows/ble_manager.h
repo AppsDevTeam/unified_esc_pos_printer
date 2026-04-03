@@ -71,22 +71,27 @@ class BleManager {
                const std::string* characteristic_uuid,
                std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
-  void GetMtu(std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void GetMtu(const std::string& device_id,
+              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   void SupportsWriteWithoutResponse(
+      const std::string& device_id,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
-  void Write(const std::vector<uint8_t>& data, bool without_response,
+  void Write(const std::string& device_id,
+             const std::vector<uint8_t>& data, bool without_response,
              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
-  void Disconnect(std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void Disconnect(const std::string& device_id,
+                  std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   void Dispose();
 
-  std::function<void(const std::string&)> connection_state_callback;
+  // Callback receives (deviceId, state).
+  std::function<void(const std::string&, const std::string&)> connection_state_callback;
 
  private:
   void StopScanInternal();
-  void Cleanup();
+  void CleanupConnection(const std::string& device_id);
 
   winrt::guid ParseUuid(const std::string& uuid_str);
 
@@ -101,15 +106,20 @@ class BleManager {
   std::unordered_set<uint64_t> resolved_addresses_;
   std::mutex scan_mutex_;
 
-  // Connection state
-  winrt::Windows::Devices::Bluetooth::BluetoothLEDevice device_{nullptr};
-  winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic
-      tx_characteristic_{nullptr};
-  winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattSession
-      gatt_session_{nullptr};
-  int mtu_payload_ = 20;
-  bool write_without_response_ = false;
-  winrt::event_token connection_status_token_;
+  // Per-device connection state
+  struct DeviceConnection {
+    winrt::Windows::Devices::Bluetooth::BluetoothLEDevice device{nullptr};
+    winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic
+        tx_characteristic{nullptr};
+    winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattSession
+        gatt_session{nullptr};
+    int mtu_payload = 20;
+    bool write_without_response = false;
+    winrt::event_token connection_status_token;
+  };
+
+  std::mutex connection_mutex_;
+  std::unordered_map<std::string, DeviceConnection> connections_;
 };
 
 }  // namespace unified_esc_pos_printer

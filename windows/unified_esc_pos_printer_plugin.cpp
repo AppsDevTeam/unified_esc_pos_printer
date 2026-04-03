@@ -95,18 +95,20 @@ UnifiedEscPosPrinterPlugin::UnifiedEscPosPrinterPlugin(
       std::unique_ptr<flutter::EventSink<flutter::EncodableValue>>&& events)
       -> std::unique_ptr<flutter::StreamHandlerError<flutter::EncodableValue>> {
     connection_state_sink_ = std::move(events);
-    ble_manager_->connection_state_callback = [this](const std::string& state) {
+    ble_manager_->connection_state_callback = [this](const std::string& device_id, const std::string& state) {
       if (connection_state_sink_) {
         flutter::EncodableMap event;
         event[flutter::EncodableValue("type")] = flutter::EncodableValue("ble");
+        event[flutter::EncodableValue("deviceId")] = flutter::EncodableValue(device_id);
         event[flutter::EncodableValue("state")] = flutter::EncodableValue(state);
         connection_state_sink_->Success(flutter::EncodableValue(event));
       }
     };
-    bt_manager_->connection_state_callback = [this](const std::string& state) {
+    bt_manager_->connection_state_callback = [this](const std::string& address, const std::string& state) {
       if (connection_state_sink_) {
         flutter::EncodableMap event;
         event[flutter::EncodableValue("type")] = flutter::EncodableValue("bt");
+        event[flutter::EncodableValue("deviceId")] = flutter::EncodableValue(address);
         event[flutter::EncodableValue("state")] = flutter::EncodableValue(state);
         connection_state_sink_->Success(flutter::EncodableValue(event));
       }
@@ -164,6 +166,19 @@ void UnifiedEscPosPrinterPlugin::HandleMethodCall(
     return default_val;
   };
 
+  auto get_bytes = [&args]() -> std::vector<uint8_t> {
+    std::vector<uint8_t> data;
+    if (args) {
+      auto it = args->find(flutter::EncodableValue("data"));
+      if (it != args->end()) {
+        if (auto* bytes = std::get_if<std::vector<uint8_t>>(&it->second)) {
+          data = *bytes;
+        }
+      }
+    }
+    return data;
+  };
+
   if (method == "requestPermissions") {
     // No runtime permissions needed on Windows
     result->Success(flutter::EncodableValue(true));
@@ -184,22 +199,34 @@ void UnifiedEscPosPrinterPlugin::HandleMethodCall(
     ble_manager_->Connect(*device_id, get_int("timeoutMs", 10000), svc, chr,
                           std::move(result));
   } else if (method == "bleGetMtu") {
-    ble_manager_->GetMtu(std::move(result));
-  } else if (method == "bleSupportsWriteWithoutResponse") {
-    ble_manager_->SupportsWriteWithoutResponse(std::move(result));
-  } else if (method == "bleWrite") {
-    std::vector<uint8_t> data;
-    if (args) {
-      auto it = args->find(flutter::EncodableValue("data"));
-      if (it != args->end()) {
-        if (auto* bytes = std::get_if<std::vector<uint8_t>>(&it->second)) {
-          data = *bytes;
-        }
-      }
+    auto* device_id = get_string("deviceId");
+    if (!device_id) {
+      result->Error("INVALID_ARGS", "deviceId is required");
+      return;
     }
-    ble_manager_->Write(data, get_bool("withoutResponse", false), std::move(result));
+    ble_manager_->GetMtu(*device_id, std::move(result));
+  } else if (method == "bleSupportsWriteWithoutResponse") {
+    auto* device_id = get_string("deviceId");
+    if (!device_id) {
+      result->Error("INVALID_ARGS", "deviceId is required");
+      return;
+    }
+    ble_manager_->SupportsWriteWithoutResponse(*device_id, std::move(result));
+  } else if (method == "bleWrite") {
+    auto* device_id = get_string("deviceId");
+    if (!device_id) {
+      result->Error("INVALID_ARGS", "deviceId is required");
+      return;
+    }
+    ble_manager_->Write(*device_id, get_bytes(), get_bool("withoutResponse", false),
+                        std::move(result));
   } else if (method == "bleDisconnect") {
-    ble_manager_->Disconnect(std::move(result));
+    auto* device_id = get_string("deviceId");
+    if (!device_id) {
+      result->Error("INVALID_ARGS", "deviceId is required");
+      return;
+    }
+    ble_manager_->Disconnect(*device_id, std::move(result));
   }
   // ── Bluetooth Classic (RFCOMM/SPP) ──────────────────────────────────
   else if (method == "getBondedDevices") {
@@ -217,18 +244,19 @@ void UnifiedEscPosPrinterPlugin::HandleMethodCall(
     bt_manager_->Connect(*address, get_int("timeoutMs", 10000),
                           std::move(result));
   } else if (method == "btWrite") {
-    std::vector<uint8_t> data;
-    if (args) {
-      auto it = args->find(flutter::EncodableValue("data"));
-      if (it != args->end()) {
-        if (auto* bytes = std::get_if<std::vector<uint8_t>>(&it->second)) {
-          data = *bytes;
-        }
-      }
+    auto* address = get_string("address");
+    if (!address) {
+      result->Error("INVALID_ARGS", "address is required");
+      return;
     }
-    bt_manager_->Write(data, std::move(result));
+    bt_manager_->Write(*address, get_bytes(), std::move(result));
   } else if (method == "btDisconnect") {
-    bt_manager_->Disconnect(std::move(result));
+    auto* address = get_string("address");
+    if (!address) {
+      result->Error("INVALID_ARGS", "address is required");
+      return;
+    }
+    bt_manager_->Disconnect(*address, std::move(result));
   }
   // ── USB via Windows Print Spooler ─────────────────────────────────────
   else if (method == "usbGetList") {
@@ -255,15 +283,7 @@ void UnifiedEscPosPrinterPlugin::HandleMethodCall(
       result->Error("USB_OPEN_FAILED", "Failed to open printer: " + *name);
     }
   } else if (method == "usbWrite") {
-    std::vector<uint8_t> data;
-    if (args) {
-      auto it = args->find(flutter::EncodableValue("data"));
-      if (it != args->end()) {
-        if (auto* bytes = std::get_if<std::vector<uint8_t>>(&it->second)) {
-          data = *bytes;
-        }
-      }
-    }
+    std::vector<uint8_t> data = get_bytes();
     if (usb_manager_.PrintBytes(data)) {
       result->Success(flutter::EncodableValue(true));
     } else {

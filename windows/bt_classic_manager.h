@@ -22,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace unified_esc_pos_printer {
@@ -52,21 +53,24 @@ class BtClassicManager {
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   void Write(
+      const std::string& address,
       const std::vector<uint8_t>& data,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   void Disconnect(
+      const std::string& address,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   void Dispose();
 
-  std::function<void(const std::string&)> connection_state_callback;
+  // Callback receives (address, state).
+  std::function<void(const std::string&, const std::string&)> connection_state_callback;
 
  private:
   static std::string FormatAddress(uint64_t address);
   static uint64_t ParseAddress(const std::string& address_str);
   void StopDiscoveryInternal();
-  void Cleanup();
+  void CleanupConnection(const std::string& address);
 
   PlatformThreadDispatcher* dispatcher_ = nullptr;
 
@@ -79,10 +83,11 @@ class BtClassicManager {
   std::vector<flutter::EncodableMap> discovered_devices_;
   std::mutex discovery_mutex_;
 
-  // Connection state
-  winrt::Windows::Networking::Sockets::StreamSocket socket_{nullptr};
-  winrt::Windows::Storage::Streams::DataWriter writer_{nullptr};
-  std::atomic<bool> disconnect_monitor_running_{false};
+  // Per-device connection state
+  std::mutex connection_mutex_;
+  std::unordered_map<std::string, winrt::Windows::Networking::Sockets::StreamSocket> sockets_;
+  std::unordered_map<std::string, winrt::Windows::Storage::Streams::DataWriter> writers_;
+  std::unordered_map<std::string, std::atomic<bool>*> disconnect_monitors_;
 };
 
 }  // namespace unified_esc_pos_printer

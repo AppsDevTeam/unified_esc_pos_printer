@@ -215,11 +215,14 @@ void BtClassicManager::Connect(
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   uint64_t bt_address = ParseAddress(address);
 
+  // Clean up any existing connection for this address
+  CleanupConnection(address);
+
   auto shared_result =
       std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
           result.release());
 
-  std::thread([this, bt_address, shared_result]() {
+  std::thread([this, address, bt_address, shared_result]() {
     try {
       auto device = BluetoothDevice::FromBluetoothAddressAsync(bt_address).get();
       if (device == nullptr) {
@@ -252,16 +255,26 @@ void BtClassicManager::Connect(
           SocketProtectionLevel::BluetoothEncryptionAllowNullAuthentication)
           .get();
 
-      socket_ = socket;
-      writer_ = DataWriter(socket_.OutputStream());
+      auto writer = DataWriter(socket.OutputStream());
+
+      {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        sockets_[address] = socket;
+        writers_[address] = writer;
+      }
 
       // Spawn disconnect monitor thread.
-      disconnect_monitor_running_ = true;
-      std::thread([this]() {
+      auto* monitor_flag = new std::atomic<bool>(true);
+      {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        disconnect_monitors_[address] = monitor_flag;
+      }
+
+      std::thread([this, address, socket, monitor_flag]() {
         try {
-          auto reader = DataReader(socket_.InputStream());
+          auto reader = DataReader(socket.InputStream());
           reader.InputStreamOptions(InputStreamOptions::Partial);
-          while (disconnect_monitor_running_) {
+          while (monitor_flag->load()) {
             // Attempt to read — blocks until data or disconnect.
             auto loaded = reader.LoadAsync(1).get();
             if (loaded == 0) break;
@@ -271,23 +284,23 @@ void BtClassicManager::Connect(
           // Socket closed or error.
         }
 
-        if (disconnect_monitor_running_) {
-          disconnect_monitor_running_ = false;
-          Cleanup();
+        if (monitor_flag->load()) {
+          monitor_flag->store(false);
+          CleanupConnection(address);
           if (dispatcher_ && connection_state_callback) {
-            dispatcher_->Post([this]() {
+            dispatcher_->Post([this, address]() {
               if (connection_state_callback) {
-                connection_state_callback("disconnected");
+                connection_state_callback(address, "disconnected");
               }
             });
           }
         }
       }).detach();
 
-      dispatcher_->Post([this, shared_result]() {
+      dispatcher_->Post([this, address, shared_result]() {
         shared_result->Success(flutter::EncodableValue());
         if (connection_state_callback) {
-          connection_state_callback("connected");
+          connection_state_callback(address, "connected");
         }
       });
     } catch (const winrt::hresult_error& e) {
@@ -307,17 +320,24 @@ void BtClassicManager::Connect(
 // ── Writing ──────────────────────────────────────────────────────────────
 
 void BtClassicManager::Write(
+    const std::string& address,
     const std::vector<uint8_t>& data,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  if (writer_ == nullptr) {
-    result->Error("NOT_CONNECTED", "Bluetooth Classic device not connected");
-    return;
+  DataWriter writer_copy{nullptr};
+  {
+    std::lock_guard<std::mutex> lock(connection_mutex_);
+    auto it = writers_.find(address);
+    if (it == writers_.end() || it->second == nullptr) {
+      result->Error("NOT_CONNECTED",
+                     "Bluetooth Classic not connected to " + address);
+      return;
+    }
+    writer_copy = it->second;
   }
 
   auto shared_result =
       std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
           result.release());
-  auto writer_copy = writer_;
 
   std::thread([this, data, shared_result, writer_copy]() {
     try {
@@ -347,29 +367,54 @@ void BtClassicManager::Write(
 // ── Disconnection ────────────────────────────────────────────────────────
 
 void BtClassicManager::Disconnect(
+    const std::string& address,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  disconnect_monitor_running_ = false;
-  Cleanup();
+  CleanupConnection(address);
   if (connection_state_callback) {
-    connection_state_callback("disconnected");
+    connection_state_callback(address, "disconnected");
   }
   result->Success(flutter::EncodableValue());
 }
 
 void BtClassicManager::Dispose() {
   StopDiscoveryInternal();
-  disconnect_monitor_running_ = false;
-  Cleanup();
+
+  std::vector<std::string> addresses;
+  {
+    std::lock_guard<std::mutex> lock(connection_mutex_);
+    for (const auto& pair : sockets_) {
+      addresses.push_back(pair.first);
+    }
+  }
+  // CleanupConnection acquires the lock itself, so call outside the lock.
+  for (const auto& addr : addresses) {
+    CleanupConnection(addr);
+  }
 }
 
-void BtClassicManager::Cleanup() {
-  if (writer_ != nullptr) {
-    try { writer_.Close(); } catch (...) {}
-    writer_ = nullptr;
+void BtClassicManager::CleanupConnection(const std::string& address) {
+  std::lock_guard<std::mutex> lock(connection_mutex_);
+
+  // Stop disconnect monitor
+  auto monitor_it = disconnect_monitors_.find(address);
+  if (monitor_it != disconnect_monitors_.end()) {
+    monitor_it->second->store(false);
+    delete monitor_it->second;
+    disconnect_monitors_.erase(monitor_it);
   }
-  if (socket_ != nullptr) {
-    try { socket_.Close(); } catch (...) {}
-    socket_ = nullptr;
+
+  // Close writer
+  auto writer_it = writers_.find(address);
+  if (writer_it != writers_.end()) {
+    try { writer_it->second.Close(); } catch (...) {}
+    writers_.erase(writer_it);
+  }
+
+  // Close socket
+  auto socket_it = sockets_.find(address);
+  if (socket_it != sockets_.end()) {
+    try { socket_it->second.Close(); } catch (...) {}
+    sockets_.erase(socket_it);
   }
 }
 
