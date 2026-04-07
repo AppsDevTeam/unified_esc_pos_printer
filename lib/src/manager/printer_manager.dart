@@ -228,28 +228,28 @@ class PrinterManager {
 
   /// Send the bytes from [ticket] to the connected printer.
   Future<void> printTicket(Ticket ticket) async {
-    _assertConnected('printTicket');
+    final PrinterConnector<PrinterDevice> connector = _assertConnected('printTicket');
     PrinterLogger.info(_tag, 'Printing ticket (${ticket.bytes.length} bytes)');
-    await _active!.writeBytes(ticket.bytes);
+    await connector.writeBytes(ticket.bytes);
   }
 
   /// Send raw [bytes] to the connected printer.
   Future<void> printBytes(List<int> bytes) async {
-    _assertConnected('printBytes');
+    final PrinterConnector<PrinterDevice> connector = _assertConnected('printBytes');
     PrinterLogger.debug(_tag, 'Printing ${bytes.length} raw bytes');
-    await _active!.writeBytes(bytes);
+    await connector.writeBytes(bytes);
   }
 
   /// Open the cash drawer connected to [pin] (default: pin 2).
   Future<void> openCashDrawer({CashDrawer pin = CashDrawer.pin2}) async {
-    _assertConnected('openCashDrawer');
+    final PrinterConnector<PrinterDevice> connector = _assertConnected('openCashDrawer');
     PrinterLogger.info(_tag, 'Opening cash drawer (${pin.name})');
 
     final List<int> bytes = pin == CashDrawer.pin2
         ? cCashDrawerPin2.codeUnits
         : cCashDrawerPin5.codeUnits;
 
-    await _active!.writeBytes(bytes);
+    await connector.writeBytes(bytes);
   }
 
   /// Current connection state of the active connector.
@@ -319,13 +319,15 @@ class PrinterManager {
     };
   }
 
-  void _assertConnected(String operation) {
-    if (!isConnected) {
+  PrinterConnector<PrinterDevice> _assertConnected(String operation) {
+    final PrinterConnector<PrinterDevice>? connector = _active;
+    if (connector == null || !isConnected) {
       throw PrinterStateException(
         'Cannot $operation: not connected to a printer',
         currentState: state,
         requiredState: PrinterConnectionState.connected,
       );
     }
+    return connector;
   }
 }
