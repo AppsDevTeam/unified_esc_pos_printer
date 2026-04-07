@@ -178,6 +178,40 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
+    /// Sends DLE EOT status query via write-with-response.  The write ACK
+    /// confirms the printer's GATT server received the data.
+    func queryStatus(deviceId: String, timeoutMs: Int, result: @escaping FlutterResult) {
+        guard let peripheral = connectedPeripherals[deviceId], let char = txCharacteristics[deviceId] else {
+            result(FlutterError(code: "NOT_CONNECTED", message: "BLE device not connected: \(deviceId)", details: nil))
+            return
+        }
+
+        let dleEot = Data([0x10, 0x04, 0x01])
+        var responded = false
+
+        // didWriteValueFor will call writeResults[deviceId] which we set here.
+        writeResults[deviceId] = { [weak self] writeResult in
+            guard !responded else { return }
+            responded = true
+            self?.writeResults.removeValue(forKey: deviceId)
+            if let error = writeResult as? FlutterError {
+                result(-1)
+            } else {
+                result(0)
+            }
+        }
+        peripheral.writeValue(dleEot, for: char, type: .withResponse)
+
+        // Timeout fallback
+        let timeoutSec = Double(timeoutMs) / 1000.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSec) { [weak self] in
+            guard !responded else { return }
+            responded = true
+            self?.writeResults.removeValue(forKey: deviceId)
+            result(-1)
+        }
+    }
+
     func disconnect(deviceId: String, result: @escaping FlutterResult) {
         if let peripheral = connectedPeripherals[deviceId], let cm = centralManager {
             cm.cancelPeripheralConnection(peripheral)

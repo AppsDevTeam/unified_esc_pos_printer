@@ -81,6 +81,9 @@ class BleManager {
              const std::vector<uint8_t>& data, bool without_response,
              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
+  void QueryStatus(const std::string& device_id, int timeout_ms,
+                   std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+
   void Disconnect(const std::string& device_id,
                   std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 

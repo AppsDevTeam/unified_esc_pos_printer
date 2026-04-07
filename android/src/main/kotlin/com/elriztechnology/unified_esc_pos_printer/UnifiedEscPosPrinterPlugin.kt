@@ -127,6 +127,11 @@ class UnifiedEscPosPrinterPlugin : FlutterPlugin, MethodCallHandler, ActivityAwa
                 val withoutResponse = call.argument<Boolean>("withoutResponse") ?: false
                 bleManager.write(deviceId, data, withoutResponse, result)
             }
+            "bleQueryStatus" -> {
+                val deviceId = call.argument<String>("deviceId")!!
+                val timeoutMs = call.argument<Int>("timeoutMs") ?: 500
+                bleManager.queryStatus(deviceId, timeoutMs, result)
+            }
             "bleDisconnect" -> {
                 val deviceId = call.argument<String>("deviceId")!!
                 bleManager.disconnect(deviceId, result)
@@ -148,6 +153,11 @@ class UnifiedEscPosPrinterPlugin : FlutterPlugin, MethodCallHandler, ActivityAwa
                 val address = call.argument<String>("address")!!
                 val data = call.argument<ByteArray>("data")!!
                 bluetoothClassicManager.write(address, data, result)
+            }
+            "btQueryStatus" -> {
+                val address = call.argument<String>("address")!!
+                val timeoutMs = call.argument<Int>("timeoutMs") ?: 500
+                bluetoothClassicManager.queryStatus(address, timeoutMs, result)
             }
             "btDisconnect" -> {
                 val address = call.argument<String>("address")!!

@@ -220,6 +220,13 @@ void UnifiedEscPosPrinterPlugin::HandleMethodCall(
     }
     ble_manager_->Write(*device_id, get_bytes(), get_bool("withoutResponse", false),
                         std::move(result));
+  } else if (method == "bleQueryStatus") {
+    auto* device_id = get_string("deviceId");
+    if (!device_id) {
+      result->Error("INVALID_ARGS", "deviceId is required");
+      return;
+    }
+    ble_manager_->QueryStatus(*device_id, get_int("timeoutMs", 500), std::move(result));
   } else if (method == "bleDisconnect") {
     auto* device_id = get_string("deviceId");
     if (!device_id) {

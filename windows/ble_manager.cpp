@@ -476,6 +476,43 @@ void BleManager::Write(
   }).detach();
 }
 
+void BleManager::QueryStatus(
+    const std::string& device_id, int timeout_ms,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  GattCharacteristic char_copy{nullptr};
+  {
+    std::lock_guard<std::mutex> lock(connection_mutex_);
+    auto it = connections_.find(device_id);
+    if (it == connections_.end() || it->second.tx_characteristic == nullptr) {
+      result->Error("NOT_CONNECTED", "BLE device not connected: " + device_id);
+      return;
+    }
+    char_copy = it->second.tx_characteristic;
+  }
+
+  auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
+      result.release());
+
+  // Send DLE EOT via write-with-response on a background thread.
+  std::thread([this, shared_result, char_copy]() {
+    try {
+      uint8_t dle_eot[] = {0x10, 0x04, 0x01};
+      DataWriter writer;
+      writer.WriteBytes(winrt::array_view<const uint8_t>(dle_eot, 3));
+      auto buffer = writer.DetachBuffer();
+      auto status = char_copy.WriteValueAsync(buffer, GattWriteOption::WriteWithResponse).get();
+      int result_val = (status == GattCommunicationStatus::Success) ? 0 : -1;
+      dispatcher_->Post([shared_result, result_val]() {
+        shared_result->Success(flutter::EncodableValue(result_val));
+      });
+    } catch (...) {
+      dispatcher_->Post([shared_result]() {
+        shared_result->Success(flutter::EncodableValue(-1));
+      });
+    }
+  }).detach();
+}
+
 // ── Disconnection ────────────────────────────────────────────────────────
 
 void BleManager::Disconnect(

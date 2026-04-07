@@ -8,9 +8,12 @@ import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class BleManager(private val context: Context) {
 
@@ -388,6 +391,58 @@ class BleManager(private val context: Context) {
         } catch (e: SecurityException) {
             writeResults.remove(deviceId)?.error("PERMISSION_DENIED", "Bluetooth write permission denied", e.message)
         }
+    }
+
+    /// Sends DLE EOT status query via write-with-response.  For BLE the
+    /// write ACK itself confirms the printer's GATT server received the data.
+    /// Returns the write status (0 = success, -1 = timeout/unsupported).
+    fun queryStatus(deviceId: String, timeoutMs: Int, result: MethodChannel.Result) {
+        val g = gatts[deviceId]
+        val char = txCharacteristics[deviceId]
+        if (g == null || char == null) {
+            result.error("NOT_CONNECTED", "BLE device not connected: $deviceId", null)
+            return
+        }
+
+        // Send DLE EOT as write-with-response — the ACK confirms receipt.
+        val dleEot = byteArrayOf(0x10, 0x04, 0x01)
+        val latch = CountDownLatch(1)
+        var writeOk = false
+
+        // Temporarily hijack writeResult for this device.
+        val originalWriteResult = writeResults.remove(deviceId)
+        writeResults[deviceId] = object : MethodChannel.Result {
+            override fun success(r: Any?) { writeOk = true; latch.countDown() }
+            override fun error(code: String, msg: String?, details: Any?) { latch.countDown() }
+            override fun notImplemented() { latch.countDown() }
+        }
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeCharacteristic(char, dleEot, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            } else {
+                @Suppress("DEPRECATION")
+                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                @Suppress("DEPRECATION")
+                char.value = dleEot
+                @Suppress("DEPRECATION")
+                g.writeCharacteristic(char)
+            }
+        } catch (e: SecurityException) {
+            writeResults.remove(deviceId)
+            result.error("PERMISSION_DENIED", "BLE write permission denied", e.message)
+            return
+        }
+
+        Thread {
+            val received = latch.await(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+            writeResults.remove(deviceId)
+            if (originalWriteResult != null) writeResults[deviceId] = originalWriteResult
+
+            val status = if (received && writeOk) 0 else -1
+            Log.d("PrinterSDK", "BLE queryStatus: ${if (status == 0) "confirmed" else "timeout"} ($deviceId)")
+            mainHandler.post { result.success(status) }
+        }.start()
     }
 
     fun disconnect(deviceId: String, result: MethodChannel.Result) {

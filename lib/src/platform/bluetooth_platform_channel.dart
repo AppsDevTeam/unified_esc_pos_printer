@@ -98,6 +98,18 @@ class BluetoothPlatformChannel {
     });
   }
 
+  /// Send DLE EOT status query via BLE write-with-response.
+  /// Returns 0 on success (GATT ACK), -1 on timeout/error.
+  Future<int> bleQueryStatus({
+    required String deviceId,
+    int timeoutMs = 500,
+  }) async {
+    return await _method.invokeMethod<int>('bleQueryStatus', {
+      'deviceId': deviceId,
+      'timeoutMs': timeoutMs,
+    }) ?? -1;
+  }
+
   /// Disconnect the BLE connection for the given device.
   Future<void> bleDisconnect({required String deviceId}) async {
     await _method.invokeMethod('bleDisconnect', {
@@ -170,6 +182,22 @@ class BluetoothPlatformChannel {
     });
   }
 
+  /// Send DLE EOT real-time status query to the printer and wait for a
+  /// single-byte response.  Returns the status byte, or -1 on timeout.
+  ///
+  /// Because BT SPP is sequential, the printer receives this query only
+  /// after all preceding data — so a successful response confirms the
+  /// printer has received everything written before this call.
+  Future<int> btQueryStatus({
+    required String address,
+    int timeoutMs = 500,
+  }) async {
+    return await _method.invokeMethod<int>('btQueryStatus', {
+      'address': address,
+      'timeoutMs': timeoutMs,
+    }) ?? -1;
+  }
+
   /// Disconnect the Classic Bluetooth connection for the given [address].
   Future<void> btDisconnect({required String address}) async {
     await _method.invokeMethod('btDisconnect', {
@@ -179,13 +207,20 @@ class BluetoothPlatformChannel {
 
   // Connection
 
+  Stream<Map<String, dynamic>>? _connectionStateStreamCache;
+
   /// Stream of connection state events. Each event is a map with:
   /// - `type`: `"ble"` or `"bt"`
   /// - `deviceId`: the device identifier (MAC address or UUID)
   /// - `state`: `"connected"` or `"disconnected"`
+  ///
+  /// The stream is shared (broadcast) — multiple connectors can listen
+  /// without interfering with each other's subscriptions.
   Stream<Map<String, dynamic>> get connectionStateStream {
-    return _connectionStateEvent.receiveBroadcastStream().map((event) {
+    _connectionStateStreamCache ??=
+        _connectionStateEvent.receiveBroadcastStream().map((event) {
       return Map<String, dynamic>.from(event as Map);
-    });
+    }).asBroadcastStream();
+    return _connectionStateStreamCache!;
   }
 }

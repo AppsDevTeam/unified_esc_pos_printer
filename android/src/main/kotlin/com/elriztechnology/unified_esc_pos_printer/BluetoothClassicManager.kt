@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import android.util.Log
 import java.io.IOException
 import java.io.OutputStream
 import java.util.UUID
@@ -43,6 +44,10 @@ class BluetoothClassicManager(private val context: Context) {
     private val sockets = ConcurrentHashMap<String, BluetoothSocket>()
     private val outputStreams = ConcurrentHashMap<String, OutputStream>()
     private val inputThreads = ConcurrentHashMap<String, Thread>()
+
+    // When true, the monitor thread yields inputStream reads to queryStatus.
+    private val queryingStatus = ConcurrentHashMap<String, Boolean>()
+
 
     var connectionStateCallback: ((String, String) -> Unit)? = null
 
@@ -218,19 +223,27 @@ class BluetoothClassicManager(private val context: Context) {
                 sockets[address] = sock
                 outputStreams[address] = sock.outputStream
 
-                // Monitor for remote disconnection
+                // Monitor for remote disconnection.
+                // Uses polling instead of blocking read() so that queryStatus
+                // can exclusively read the printer's response.
                 val monitorThread = Thread {
                     try {
-                        val inputStream = sock.inputStream
-                        val buffer = ByteArray(1024)
                         while (!Thread.currentThread().isInterrupted) {
-                            val bytesRead = inputStream.read(buffer)
-                            if (bytesRead == -1) {
-                                break
+                            if (queryingStatus[address] == true) {
+                                Thread.sleep(100)
+                                continue
                             }
+                            val inputStream = sock.inputStream
+                            if (inputStream.available() > 0) {
+                                val buf = ByteArray(inputStream.available())
+                                inputStream.read(buf)
+                            }
+                            Thread.sleep(500)
                         }
                     } catch (_: IOException) {
-                        // Connection lost
+                        // Connection lost — socket closed or remote disconnect
+                    } catch (_: InterruptedException) {
+                        // Thread interrupted by cleanupConnection — expected
                     }
                     mainHandler.post {
                         if (sockets.containsKey(address)) {
@@ -267,13 +280,59 @@ class BluetoothClassicManager(private val context: Context) {
             return
         }
 
-        try {
-            os.write(data)
-            os.flush()
-            result.success(null)
-        } catch (e: IOException) {
-            result.error("WRITE_FAILED", "Bluetooth Classic write failed", e.message)
+        Thread {
+            try {
+                os.write(data)
+                os.flush()
+                mainHandler.post { result.success(null) }
+            } catch (e: IOException) {
+                mainHandler.post { result.error("WRITE_FAILED", "Bluetooth Classic write failed", e.message) }
+            }
+        }.start()
+    }
+
+    /// Sends DLE EOT (real-time status query) and waits for the printer's
+    /// single-byte response.  Because BT SPP is a sequential stream the
+    /// printer can only receive this command after all preceding data.
+    fun queryStatus(address: String, timeoutMs: Int, result: MethodChannel.Result) {
+        val os = outputStreams[address]
+        val sock = sockets[address]
+        if (os == null || sock == null) {
+            result.error("NOT_CONNECTED", "Bluetooth Classic not connected to $address", null)
+            return
         }
+
+        Thread {
+            queryingStatus[address] = true
+            try {
+                // Small pause to let monitor thread yield.
+                Thread.sleep(150)
+
+                // Drain any stale bytes from the input buffer.
+                val input = sock.inputStream
+                while (input.available() > 0) { input.read() }
+
+                os.write(byteArrayOf(0x10, 0x04, 0x01))
+                os.flush()
+
+                val deadline = System.currentTimeMillis() + timeoutMs
+                while (System.currentTimeMillis() < deadline) {
+                    if (input.available() > 0) {
+                        val status = input.read()
+                        Log.d("PrinterSDK", "BT queryStatus: response 0x${status.toString(16)} ($address)")
+                        mainHandler.post { result.success(status) }
+                        return@Thread
+                    }
+                    Thread.sleep(50)
+                }
+                Log.d("PrinterSDK", "BT queryStatus: timeout (${timeoutMs}ms) ($address)")
+                mainHandler.post { result.success(-1) }
+            } catch (e: IOException) {
+                mainHandler.post { result.error("QUERY_FAILED", "Bluetooth Classic status query failed", e.message) }
+            } finally {
+                queryingStatus.remove(address)
+            }
+        }.start()
     }
 
     fun disconnect(address: String, result: MethodChannel.Result) {

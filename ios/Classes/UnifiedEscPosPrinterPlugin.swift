@@ -86,6 +86,10 @@ public class UnifiedEscPosPrinterPlugin: NSObject, FlutterPlugin {
             let data = (args?["data"] as? FlutterStandardTypedData)?.data ?? Data()
             let withoutResponse = args?["withoutResponse"] as? Bool ?? false
             bleManager?.write(deviceId: deviceId, data: data, withoutResponse: withoutResponse, result: result)
+        case "bleQueryStatus":
+            let deviceId = args?["deviceId"] as? String ?? ""
+            let timeoutMs = args?["timeoutMs"] as? Int ?? 500
+            bleManager?.queryStatus(deviceId: deviceId, timeoutMs: timeoutMs, result: result)
         case "bleDisconnect":
             let deviceId = args?["deviceId"] as? String ?? ""
             bleManager?.disconnect(deviceId: deviceId, result: result)
