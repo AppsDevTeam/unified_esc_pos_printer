@@ -5,8 +5,10 @@ import 'package:flutter/services.dart';
 import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
+
 import '../platform/bluetooth_platform_channel.dart';
 import '../utils/printer_logger.dart';
+import 'post_write_status.dart';
 import 'printer_connector.dart';
 
 const String _tag = 'BLE';
@@ -266,6 +268,15 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
           withoutResponse: _writeWithoutResponse,
         );
       }
+
+      await postWriteStatusQuery(
+        queryFn: (int timeoutMs) => _platform.bleQueryStatus(
+          deviceId: deviceId,
+          timeoutMs: timeoutMs,
+        ),
+        bytesWritten: bytes.length,
+        tag: _tag,
+      );
 
       _setState(PrinterConnectionState.connected);
     } catch (e) {

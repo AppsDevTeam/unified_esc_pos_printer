@@ -7,8 +7,10 @@ import '../core/commands.dart';
 import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
+
 import '../platform/bluetooth_platform_channel.dart';
 import '../utils/printer_logger.dart';
+import 'post_write_status.dart';
 import 'printer_connector.dart';
 
 const String _tag = 'Bluetooth';
@@ -76,8 +78,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
 
     // Emit bonded (paired) devices immediately.
     try {
-      final List<Map<String, dynamic>> bonded =
-          await _platform.getBondedDevices();
+      final List<Map<String, dynamic>> bonded = await _platform.getBondedDevices();
 
       for (final Map<String, dynamic> d in bonded) {
         found.add(BluetoothPrinterDevice(
@@ -225,12 +226,9 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
 
       // Monitor for remote disconnection.
       _connectionSub = _platform.connectionStateStream
-          .where((event) =>
-              event['type'] == 'bt' &&
-              event['deviceId'] == device.address)
+          .where((event) => event['type'] == 'bt' && event['deviceId'] == device.address)
           .listen((event) {
-        if (event['state'] == 'disconnected' &&
-            _state != PrinterConnectionState.disconnected) {
+        if (event['state'] == 'disconnected' && _state != PrinterConnectionState.disconnected) {
           PrinterLogger.warning(_tag, 'Remote disconnection detected');
           _connectedAddress = null;
           _connectionSub?.cancel();
@@ -288,6 +286,15 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
           data: Uint8List.fromList(bytes.sublist(i, end)),
         );
       }
+
+      await postWriteStatusQuery(
+        queryFn: (int timeoutMs) => _platform.btQueryStatus(
+          address: address,
+          timeoutMs: timeoutMs,
+        ),
+        bytesWritten: bytes.length,
+        tag: _tag,
+      );
 
       _setState(PrinterConnectionState.connected);
     } catch (e) {

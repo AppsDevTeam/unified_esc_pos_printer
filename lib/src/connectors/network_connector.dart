@@ -5,7 +5,9 @@ import '../core/commands.dart';
 import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
+
 import '../utils/printer_logger.dart';
+import 'post_write_status.dart';
 import 'printer_connector.dart';
 
 const String _tag = 'Network';
@@ -216,6 +218,13 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       PrinterLogger.debug(_tag, 'Writing ${bytes.length} bytes');
       _socket!.add(bytes);
       await _socket!.flush();
+
+      await postWriteStatusQuery(
+        queryFn: (int timeoutMs) => _queryStatus(timeoutMs),
+        bytesWritten: bytes.length,
+        tag: _tag,
+      );
+
       _setState(PrinterConnectionState.connected);
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
@@ -248,6 +257,45 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
   Future<void> dispose() async {
     await disconnect();
     await _stateController.close();
+  }
+
+  /// Sends DLE EOT status query and waits for a single-byte response.
+  /// Returns the status byte, or -1 on timeout.
+  Future<int> _queryStatus(int timeoutMs) async {
+    final Socket? sock = _socket;
+    if (sock == null) return -1;
+
+    final Completer<int> completer = Completer<int>();
+    StreamSubscription<List<int>>? sub;
+
+    sub = sock.listen(
+      (List<int> data) {
+        if (!completer.isCompleted && data.isNotEmpty) {
+          completer.complete(data.first);
+          sub?.cancel();
+        }
+      },
+      onError: (Object e) {
+        if (!completer.isCompleted) completer.complete(-1);
+      },
+      onDone: () {
+        if (!completer.isCompleted) completer.complete(-1);
+      },
+    );
+
+    // Send DLE EOT n=1 (printer status)
+    sock.add(const [0x10, 0x04, 0x01]);
+    await sock.flush();
+
+    // Wait with timeout
+    final Future<int> timeoutFuture = Future<int>.delayed(
+      Duration(milliseconds: timeoutMs),
+      () => -1,
+    );
+
+    final int result = await Future.any([completer.future, timeoutFuture]);
+    await sub.cancel();
+    return result;
   }
 
   void _setState(PrinterConnectionState next) {
