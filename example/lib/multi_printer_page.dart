@@ -57,9 +57,8 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
   // ── Scanning ───────────────────────────────────────────────────────────
 
   Future<void> _startScan() async {
-    final Set<PrinterConnectionType> types = _scanFilter != null
-        ? {_scanFilter!}
-        : PrinterConnectionType.values.toSet();
+    final Set<PrinterConnectionType> types =
+        _scanFilter != null ? {_scanFilter!} : PrinterConnectionType.values.toSet();
 
     setState(() {
       _scanning = true;
@@ -68,18 +67,17 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
 
     _scanner
         .scanAll(
-          timeout: Duration(
-            seconds: types.contains(PrinterConnectionType.network) ? 30 : 5,
-          ),
-          types: types,
-        )
+      timeout: Duration(
+        seconds: types.contains(PrinterConnectionType.network) ? 30 : 5,
+      ),
+      types: types,
+    )
         .listen(
       (devices) {
         if (!mounted) return;
         setState(() {
           // Merge — keep existing entries (preserve selection), add new ones.
-          final Set<String> existing =
-              _entries.map((_DeviceEntry e) => deviceKey(e.device)).toSet();
+          final Set<String> existing = _entries.map((_DeviceEntry e) => deviceKey(e.device)).toSet();
           for (final PrinterDevice d in devices) {
             if (!existing.contains(deviceKey(d))) {
               _entries.add(_DeviceEntry(device: d));
@@ -102,8 +100,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
   // ── Printing ───────────────────────────────────────────────────────────
 
   Future<void> _printToSelected() async {
-    final List<_DeviceEntry> targets =
-        _entries.where((_DeviceEntry e) => e.selected).toList();
+    final List<_DeviceEntry> targets = _entries.where((_DeviceEntry e) => e.selected).toList();
 
     if (targets.isEmpty) {
       _showSnack('No printers selected');
@@ -127,8 +124,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
 
     // Print to all selected printers in parallel.
     final List<Future<void>> jobs = targets.map((_DeviceEntry entry) async {
-      final PrinterManager manager =
-          PrinterManager(logLevel: PrinterLogLevel.debug);
+      final PrinterManager manager = PrinterManager(logLevel: PrinterLogLevel.debug);
 
       try {
         if (mounted) setState(() => entry.status = _DeviceStatus.connecting);
@@ -158,15 +154,12 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
     await Future.wait(jobs);
 
     if (mounted) {
-      final int ok =
-          targets.where((_DeviceEntry e) => e.status == _DeviceStatus.done).length;
-      final int fail =
-          targets.where((_DeviceEntry e) => e.status == _DeviceStatus.error).length;
+      final int ok = targets.where((_DeviceEntry e) => e.status == _DeviceStatus.done).length;
+      final int fail = targets.where((_DeviceEntry e) => e.status == _DeviceStatus.error).length;
       _showSnack('Done: $ok OK, $fail failed');
       setState(() => _printing = false);
     }
   }
-
 
   // ── UI helpers ─────────────────────────────────────────────────────────
 
@@ -198,8 +191,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
 
   @override
   Widget build(BuildContext context) {
-    final int selectedCount =
-        _entries.where((_DeviceEntry e) => e.selected).length;
+    final int selectedCount = _entries.where((_DeviceEntry e) => e.selected).length;
 
     return Scaffold(
       appBar: AppBar(
@@ -220,8 +212,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
                     selected: _scanFilter == null,
                     onTap: () => setState(() => _scanFilter = null),
                   ),
-                  for (final PrinterConnectionType type
-                      in PrinterConnectionType.values)
+                  for (final PrinterConnectionType type in PrinterConnectionType.values)
                     ScanFilterChip(
                       label: filterLabel(type),
                       icon: filterIcon(type),
@@ -247,9 +238,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
                       )
                     : Icon(filterIcon(_scanFilter)),
                 label: Text(
-                  _scanning
-                      ? 'Scanning ${filterLabel(_scanFilter)}...'
-                      : 'Scan ${filterLabel(_scanFilter)}',
+                  _scanning ? 'Scanning ${filterLabel(_scanFilter)}...' : 'Scan ${filterLabel(_scanFilter)}',
                 ),
               ),
             ),
@@ -260,9 +249,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
             child: _entries.isEmpty
                 ? Center(
                     child: Text(
-                      _scanning
-                          ? 'Searching for printers...'
-                          : 'No printers found. Tap Scan.',
+                      _scanning ? 'Searching for printers...' : 'No printers found. Tap Scan.',
                     ),
                   )
                 : ListView.builder(
@@ -271,18 +258,15 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
                       final _DeviceEntry entry = _entries[i];
                       return CheckboxListTile(
                         value: entry.selected,
-                        onChanged: _scanning || _printing
-                            ? null
-                            : (bool? v) =>
-                                setState(() => entry.selected = v ?? false),
+                        onChanged:
+                            _scanning || _printing ? null : (bool? v) => setState(() => entry.selected = v ?? false),
                         secondary: Icon(iconForDevice(entry.device)),
                         title: Text(entry.device.name),
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(subtitleForDevice(entry.device)),
-                            if (entry.status == _DeviceStatus.error &&
-                                entry.errorMessage != null)
+                            if (entry.status == _DeviceStatus.error && entry.errorMessage != null)
                               Text(
                                 entry.errorMessage ?? '',
                                 style: const TextStyle(
@@ -295,9 +279,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
                           ],
                         ),
                         controlAffinity: ListTileControlAffinity.trailing,
-                        isThreeLine:
-                            entry.status == _DeviceStatus.error &&
-                            entry.errorMessage != null,
+                        isThreeLine: entry.status == _DeviceStatus.error && entry.errorMessage != null,
                       );
                     },
                   ),
@@ -344,9 +326,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
                             label: Text(entry.value),
                             selected: _selectedParts.contains(entry.key),
                             onSelected: (bool selected) => setState(() {
-                              selected
-                                  ? _selectedParts.add(entry.key)
-                                  : _selectedParts.remove(entry.key);
+                              selected ? _selectedParts.add(entry.key) : _selectedParts.remove(entry.key);
                             }),
                           ),
                         ),
@@ -360,21 +340,18 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
                       onPressed: _printing
                           ? null
                           : () => setState(() {
-                                final bool allSelected = _entries
-                                    .every((_DeviceEntry e) => e.selected);
+                                final bool allSelected = _entries.every((_DeviceEntry e) => e.selected);
                                 for (final _DeviceEntry e in _entries) {
                                   e.selected = !allSelected;
                                 }
                               }),
                       icon: Icon(
-                        _entries.isNotEmpty &&
-                                _entries.every((_DeviceEntry e) => e.selected)
+                        _entries.isNotEmpty && _entries.every((_DeviceEntry e) => e.selected)
                             ? Icons.deselect
                             : Icons.select_all,
                       ),
                       label: Text(
-                        _entries.isNotEmpty &&
-                                _entries.every((_DeviceEntry e) => e.selected)
+                        _entries.isNotEmpty && _entries.every((_DeviceEntry e) => e.selected)
                             ? 'Deselect All'
                             : 'Select All',
                       ),
@@ -382,8 +359,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
                     const Spacer(),
                     // Per-device status summary
                     for (final _DeviceEntry entry in _entries)
-                      if (entry.selected &&
-                          entry.status != _DeviceStatus.idle)
+                      if (entry.selected && entry.status != _DeviceStatus.idle)
                         Padding(
                           padding: const EdgeInsets.only(left: 4),
                           child: _statusIcon(entry.status),
@@ -394,20 +370,15 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton.icon(
-                    onPressed: _printing || selectedCount == 0 || _selectedParts.isEmpty
-                        ? null
-                        : _printToSelected,
+                    onPressed: _printing || selectedCount == 0 || _selectedParts.isEmpty ? null : _printToSelected,
                     icon: _printing
                         ? const SizedBox.square(
                             dimension: 16,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white),
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                           )
                         : const Icon(Icons.print),
                     label: Text(
-                      _printing
-                          ? 'Printing...'
-                          : 'Print to $selectedCount printer${selectedCount == 1 ? '' : 's'}',
+                      _printing ? 'Printing...' : 'Print to $selectedCount printer${selectedCount == 1 ? '' : 's'}',
                     ),
                   ),
                 ),
@@ -418,5 +389,4 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
       ),
     );
   }
-
 }
