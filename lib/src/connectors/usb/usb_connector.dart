@@ -2,6 +2,7 @@ import 'dart:io';
 
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
+import '../../models/printer_status.dart';
 import '../printer_connector.dart';
 import 'usb_connector_android.dart'
     if (dart.library.html) 'usb_connector_stub.dart' as android_impl;
@@ -59,6 +60,10 @@ class UsbConnector extends PrinterConnector<UsbPrinterDevice> {
 
   @override
   Future<void> writeBytes(List<int> bytes) => _impl.writeBytes(bytes);
+
+  @override
+  Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) =>
+      _impl.queryStatus(timeoutMs: timeoutMs);
 
   @override
   Future<void> disconnect() => _impl.disconnect();

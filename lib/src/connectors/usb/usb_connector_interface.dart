@@ -1,5 +1,6 @@
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
+import '../../models/printer_status.dart';
 import '../printer_connector.dart';
 
 /// Abstract USB connector interface shared by all platform implementations.
@@ -26,6 +27,9 @@ abstract class UsbConnectorBase extends PrinterConnector<UsbPrinterDevice> {
 
   @override
   Future<void> writeBytes(List<int> bytes);
+
+  @override
+  Future<PrinterStatus> queryStatus({int timeoutMs = 2000});
 
   @override
   Future<void> disconnect();

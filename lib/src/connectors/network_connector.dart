@@ -6,6 +6,7 @@ import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
 
+import '../models/printer_status.dart';
 import '../utils/printer_logger.dart';
 import 'printer_connector.dart';
 
@@ -225,6 +226,50 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('Failed to write bytes to printer', cause: e);
     }
+  }
+
+  @override
+  Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
+    _assertState(PrinterConnectionState.connected, 'queryStatus');
+
+    final Socket? sock = _socket;
+    if (sock == null) return PrinterStatus.timeout;
+
+    final Completer<int> completer = Completer<int>();
+    StreamSubscription<List<int>>? sub;
+
+    sub = sock.listen(
+      (List<int> data) {
+        if (!completer.isCompleted && data.isNotEmpty) {
+          completer.complete(data.first);
+          sub?.cancel();
+        }
+      },
+      onError: (Object e) {
+        if (!completer.isCompleted) completer.complete(-1);
+      },
+      onDone: () {
+        if (!completer.isCompleted) completer.complete(-1);
+      },
+    );
+
+    // Send DLE EOT n=1 (printer status)
+    sock.add(const [0x10, 0x04, 0x01]);
+    await sock.flush();
+
+    final Future<int> timeoutFuture = Future<int>.delayed(
+      Duration(milliseconds: timeoutMs),
+      () => -1,
+    );
+
+    final int rawStatus = await Future.any([completer.future, timeoutFuture]);
+    await sub.cancel();
+
+    final PrinterStatus status = rawStatus >= 0
+        ? PrinterStatus.fromByte(rawStatus)
+        : PrinterStatus.timeout;
+    PrinterLogger.debug(_tag, 'queryStatus: $status');
+    return status;
   }
 
   // ── Disconnection ──────────────────────────────────────────────────────────

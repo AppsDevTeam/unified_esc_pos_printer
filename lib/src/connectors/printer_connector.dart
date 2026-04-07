@@ -1,5 +1,6 @@
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
+import '../models/printer_status.dart';
 
 /// Abstract base for all connection-type-specific connectors.
 ///
@@ -38,6 +39,14 @@ abstract class PrinterConnector<T extends PrinterDevice> {
   /// Throws [PrinterStateException] if not connected.
   /// Throws [PrinterWriteException] if the write fails.
   Future<void> writeBytes(List<int> bytes);
+
+  /// Send a DLE EOT status query and return the parsed result.
+  ///
+  /// [timeoutMs] controls how long to wait for a response before returning
+  /// [PrinterStatus.timeout].
+  ///
+  /// Throws [PrinterStateException] if not connected.
+  Future<PrinterStatus> queryStatus({int timeoutMs = 2000});
 
   /// Disconnect from the current printer.
   Future<void> disconnect();

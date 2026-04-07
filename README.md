@@ -15,6 +15,7 @@ A unified ESC/POS thermal printer package for Flutter. Supports USB, Bluetooth C
 - **Cash drawer** — Pin 2 and Pin 5 kick commands
 - **Beep** — Configurable buzzer count and duration
 - **Capability profiles** — 200+ built-in printer model profiles with code page mappings
+- **Printer status query** — DLE EOT real-time status (online, error) on BLE, Bluetooth, Network, and USB
 - **Connection state tracking** — Validated state transitions with broadcast streams
 - **Typed exceptions** — Granular exception hierarchy for connection, permission, write, and scan errors
 
@@ -393,6 +394,33 @@ final manager = PrinterManager(
 );
 ```
 
+### Printer Status Query
+
+Query the printer's real-time status using DLE EOT:
+
+```dart
+final PrinterStatus status = await manager.queryStatus();
+
+if (status == PrinterStatus.unsupported) {
+  print('This connection does not support status queries');
+} else if (status == PrinterStatus.timeout) {
+  print('Printer did not respond');
+} else if (status.online && !status.hasError) {
+  print('Printer is ready');
+} else {
+  print('Printer error — online: ${status.online}, error: ${status.hasError}');
+}
+```
+
+| Connection        | Status query support                         |
+| ----------------- | -------------------------------------------- |
+| BLE               | Yes (via GATT write-with-response)           |
+| Bluetooth Classic | Yes (via SPP read-back)                      |
+| Network (TCP/IP)  | Yes (manual call only, not used after print) |
+| USB (Android)     | Yes (via serial input stream)                |
+| USB (Desktop)     | Yes (via serial port reader)                 |
+| USB (Windows)     | No (Print Spooler is write-only)             |
+
 ### Raw Bytes
 
 For advanced use cases, send raw ESC/POS command bytes:
@@ -416,6 +444,7 @@ await manager.printBytes([0x1B, 0x40]);
 | `PrintColumn`            | Column definition for table rows with flex-based sizing                                                    |
 | `CapabilityProfile`      | Printer capability and code page profile loader                                                            |
 | `PrinterDevice`          | Abstract base for `NetworkPrinterDevice`, `BlePrinterDevice`, `BluetoothPrinterDevice`, `UsbPrinterDevice` |
+| `PrinterStatus`          | DLE EOT status result — `supported`, `online`, `hasError`, `rawByte`; includes `timeout` and `unsupported` |
 | `PrinterConnectionState` | Connection state enum with validated transitions                                                           |
 | `PrinterException`       | Base exception with subclasses for connection, write, permission, scan, state errors                       |
 | `PrinterLogLevel`        | Log level enum (`none`, `error`, `warning`, `info`, `debug`) for the `logLevel` parameter                  |

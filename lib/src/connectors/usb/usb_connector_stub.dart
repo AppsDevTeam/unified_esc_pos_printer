@@ -3,6 +3,7 @@ import 'dart:async';
 import '../../exceptions/printer_exception.dart';
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
+import '../../models/printer_status.dart';
 import 'usb_connector_interface.dart';
 
 /// Stub USB connector for unsupported platforms (web, Fuchsia, etc.).
@@ -43,6 +44,11 @@ class UsbConnectorImpl extends UsbConnectorBase {
     return throw const PrinterConnectionException(
       'USB printing is not supported on this platform',
     );
+  }
+
+  @override
+  Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
+    return PrinterStatus.unsupported;
   }
 
   @override

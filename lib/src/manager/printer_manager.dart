@@ -11,6 +11,7 @@ import '../core/ticket.dart';
 import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
+import '../models/printer_status.dart';
 import '../utils/printer_log_level.dart';
 import '../utils/printer_logger.dart';
 
@@ -250,6 +251,15 @@ class PrinterManager {
         : cCashDrawerPin5.codeUnits;
 
     await connector.writeBytes(bytes);
+  }
+
+  /// Send a DLE EOT status query to the connected printer.
+  ///
+  /// Returns [PrinterStatus.timeout] when the printer does not respond within
+  /// [timeoutMs] milliseconds or does not support DLE EOT (e.g. USB).
+  Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
+    final PrinterConnector<PrinterDevice> connector = _assertConnected('queryStatus');
+    return connector.queryStatus(timeoutMs: timeoutMs);
   }
 
   /// Current connection state of the active connector.

@@ -53,8 +53,18 @@ class PrinterStatus {
     rawByte: -1,
   );
 
+  /// The connector does not support DLE EOT status queries (e.g. Windows
+  /// Print Spooler).
+  static const PrinterStatus unsupported = PrinterStatus._(
+    supported: false,
+    online: false,
+    hasError: false,
+    rawByte: -2,
+  );
+
   @override
   String toString() {
+    if (rawByte == -2) return 'PrinterStatus(unsupported)';
     if (!supported) return 'PrinterStatus(timeout)';
     return 'PrinterStatus(online: $online, hasError: $hasError, raw: 0x${rawByte.toRadixString(16)})';
   }

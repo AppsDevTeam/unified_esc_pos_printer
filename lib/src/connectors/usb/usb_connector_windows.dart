@@ -6,6 +6,7 @@ import '../../core/commands.dart';
 import '../../exceptions/printer_exception.dart';
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
+import '../../models/printer_status.dart';
 import 'usb_connector_interface.dart';
 
 /// USB connector for Windows using the native Print Spooler API.
@@ -104,6 +105,11 @@ class UsbConnectorImpl extends UsbConnectorBase {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('USB spooler write failed', cause: e);
     }
+  }
+
+  @override
+  Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
+    return PrinterStatus.unsupported;
   }
 
   @override

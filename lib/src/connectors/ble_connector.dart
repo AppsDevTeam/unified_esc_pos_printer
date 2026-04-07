@@ -7,6 +7,7 @@ import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
 
 import '../platform/bluetooth_platform_channel.dart';
+import '../models/printer_status.dart';
 import '../utils/printer_logger.dart';
 import 'post_write_status.dart';
 import 'printer_connector.dart';
@@ -285,6 +286,21 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('BLE write failed', cause: e);
     }
+  }
+
+  @override
+  Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
+    _assertState(PrinterConnectionState.connected, 'queryStatus');
+    final String deviceId = _connectedDeviceId ?? '';
+    final int rawStatus = await _platform.bleQueryStatus(
+      deviceId: deviceId,
+      timeoutMs: timeoutMs,
+    );
+    final PrinterStatus status = rawStatus >= 0
+        ? PrinterStatus.fromByte(rawStatus)
+        : PrinterStatus.timeout;
+    PrinterLogger.debug(_tag, 'queryStatus: $status');
+    return status;
   }
 
   @override

@@ -134,6 +134,20 @@ class _PrinterDemoPageState extends State<PrinterDemoPage> {
     }
   }
 
+  Future<void> _queryStatus() async {
+    if (_state != PrinterConnectionState.connected) {
+      _showSnack('No printer connected');
+      return;
+    }
+
+    try {
+      final PrinterStatus status = await _manager.queryStatus();
+      _showSnack('Status: $status');
+    } on PrinterException catch (e) {
+      _showSnack('Status query failed: ${e.message}');
+    }
+  }
+
   void _showSnack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
@@ -300,15 +314,24 @@ class _PrinterDemoPageState extends State<PrinterDemoPage> {
                   ),
                 ),
                 SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    onPressed: _scanning || !connected || _selectedParts.isEmpty
-                        ? null
-                        : _printTestTicket,
-                    icon: const Icon(Icons.receipt_long),
-                    label: const Text('Print Test Ticket'),
-                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _scanning || !connected || _selectedParts.isEmpty
+                            ? null
+                            : _printTestTicket,
+                        icon: const Icon(Icons.receipt_long),
+                        label: const Text('Print Test Ticket'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton.tonalIcon(
+                      onPressed: connected ? _queryStatus : null,
+                      icon: const Icon(Icons.info_outline),
+                      label: const Text('Status'),
+                    ),
+                  ],
                 ),
               ],
             ),

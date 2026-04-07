@@ -7,6 +7,7 @@ import '../../core/commands.dart';
 import '../../exceptions/printer_exception.dart';
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
+import '../../models/printer_status.dart';
 import '../../utils/printer_logger.dart';
 import 'usb_connector_interface.dart';
 
@@ -134,6 +135,43 @@ class UsbConnectorImpl extends UsbConnectorBase {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('USB serial write failed', cause: e);
     }
+  }
+
+  @override
+  Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
+    _assertState(PrinterConnectionState.connected, 'queryStatus');
+
+    final SerialPort? port = _port;
+    if (port == null) return PrinterStatus.timeout;
+
+    final SerialPortReader reader = SerialPortReader(port, timeout: timeoutMs);
+    final Completer<int> completer = Completer<int>();
+    final StreamSubscription<Uint8List> sub = reader.stream.listen(
+      (Uint8List data) {
+        if (!completer.isCompleted && data.isNotEmpty) {
+          completer.complete(data.first);
+        }
+      },
+      onError: (Object e) {
+        if (!completer.isCompleted) completer.complete(-1);
+      },
+    );
+
+    // Send DLE EOT n=1 (printer status)
+    port.write(Uint8List.fromList(const [0x10, 0x04, 0x01]));
+
+    final int rawStatus = await Future.any<int>([
+      completer.future,
+      Future<int>.delayed(Duration(milliseconds: timeoutMs), () => -1),
+    ]);
+    await sub.cancel();
+    reader.close();
+
+    final PrinterStatus status = rawStatus >= 0
+        ? PrinterStatus.fromByte(rawStatus)
+        : PrinterStatus.timeout;
+    PrinterLogger.debug(_tag, 'queryStatus: $status');
+    return status;
   }
 
   @override
