@@ -26,10 +26,54 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     var connectionStateCallback: ((String, String) -> Void)?
 
+    /// Continuations waiting for CBCentralManager to leave the `.unknown` state.
+    /// Each is called with `true` when the state becomes `.poweredOn`, or
+    /// `false` on any other resolved state / timeout.
+    private var poweredOnContinuations: [(Bool) -> Void] = []
+
     // Lazy init to avoid triggering the BT permission dialog on plugin load
     private func ensureCentralManager() {
         if centralManager == nil {
             centralManager = CBCentralManager(delegate: self, queue: nil)
+        }
+    }
+
+    /// Waits for the CBCentralManager to reach `.poweredOn`.
+    ///
+    /// - If already `.poweredOn`, calls `completion(true)` synchronously.
+    /// - If the state is `.unknown` (adapter still initialising), queues the
+    ///   completion and resolves it once `centralManagerDidUpdateState` fires.
+    /// - Falls back to `completion(false)` after [timeout] seconds.
+    private func waitForPoweredOn(timeout: TimeInterval = 5.0,
+                                  completion: @escaping (Bool) -> Void) {
+        guard let cm = centralManager else {
+            completion(false)
+            return
+        }
+
+        if cm.state == .poweredOn {
+            completion(true)
+            return
+        }
+
+        // Already resolved to a non-poweredOn state — fail immediately.
+        if cm.state != .unknown {
+            completion(false)
+            return
+        }
+
+        // State is .unknown — manager is still initialising, wait for update.
+        var resolved = false
+        let resolve: (Bool) -> Void = { isPoweredOn in
+            guard !resolved else { return }
+            resolved = true
+            completion(isPoweredOn)
+        }
+
+        poweredOnContinuations.append(resolve)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+            resolve(false)
         }
     }
 
@@ -81,22 +125,25 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func startScan(timeoutMs: Int, result: @escaping FlutterResult) {
         ensureCentralManager()
-        guard let cm = centralManager, cm.state == .poweredOn else {
-            result(FlutterError(code: "UNAVAILABLE", message: "Bluetooth is not powered on", details: nil))
-            return
+
+        waitForPoweredOn { [weak self] isPoweredOn in
+            guard let self = self, let cm = self.centralManager, isPoweredOn else {
+                result(FlutterError(code: "UNAVAILABLE", message: "Bluetooth is not powered on", details: nil))
+                return
+            }
+
+            self.discoveredDevices.removeAll()
+            cm.scanForPeripherals(withServices: nil, options: [
+                CBCentralManagerScanOptionAllowDuplicatesKey: false
+            ])
+
+            let timeout = Double(timeoutMs) / 1000.0
+            self.scanTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
+                self?.stopScanInternal()
+            }
+
+            result(nil)
         }
-
-        discoveredDevices.removeAll()
-        cm.scanForPeripherals(withServices: nil, options: [
-            CBCentralManagerScanOptionAllowDuplicatesKey: false
-        ])
-
-        let timeout = Double(timeoutMs) / 1000.0
-        scanTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
-            self?.stopScanInternal()
-        }
-
-        result(nil)
     }
 
     func stopScan(result: @escaping FlutterResult) {
@@ -112,41 +159,44 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func connect(deviceId: String, timeoutMs: Int, serviceUuid: String?, characteristicUuid: String?, result: @escaping FlutterResult) {
         ensureCentralManager()
-        guard let cm = centralManager, cm.state == .poweredOn else {
-            result(FlutterError(code: "UNAVAILABLE", message: "Bluetooth is not powered on", details: nil))
-            return
-        }
 
-        guard let uuid = UUID(uuidString: deviceId) else {
-            result(FlutterError(code: "INVALID_DEVICE", message: "Invalid device UUID: \(deviceId)", details: nil))
-            return
-        }
+        waitForPoweredOn { [weak self] isPoweredOn in
+            guard let self = self, let cm = self.centralManager, isPoweredOn else {
+                result(FlutterError(code: "UNAVAILABLE", message: "Bluetooth is not powered on", details: nil))
+                return
+            }
 
-        targetServiceUUIDs[deviceId] = serviceUuid != nil ? CBUUID(string: serviceUuid!) : BleManager.escPosServiceUUID
-        targetCharUUIDs[deviceId] = characteristicUuid != nil ? CBUUID(string: characteristicUuid!) : BleManager.escPosTxCharUUID
+            guard let uuid = UUID(uuidString: deviceId) else {
+                result(FlutterError(code: "INVALID_DEVICE", message: "Invalid device UUID: \(deviceId)", details: nil))
+                return
+            }
 
-        let peripherals = cm.retrievePeripherals(withIdentifiers: [uuid])
-        guard let peripheral = peripherals.first else {
-            result(FlutterError(code: "NOT_FOUND", message: "Peripheral not found for UUID: \(deviceId)", details: nil))
-            return
-        }
+            self.targetServiceUUIDs[deviceId] = serviceUuid != nil ? CBUUID(string: serviceUuid!) : BleManager.escPosServiceUUID
+            self.targetCharUUIDs[deviceId] = characteristicUuid != nil ? CBUUID(string: characteristicUuid!) : BleManager.escPosTxCharUUID
 
-        // Clean up any existing connection
-        cleanupConnection(deviceId)
+            let peripherals = cm.retrievePeripherals(withIdentifiers: [uuid])
+            guard let peripheral = peripherals.first else {
+                result(FlutterError(code: "NOT_FOUND", message: "Peripheral not found for UUID: \(deviceId)", details: nil))
+                return
+            }
 
-        connectResults[deviceId] = result
-        connectedPeripherals[deviceId] = peripheral
-        peripheral.delegate = self
+            // Clean up any existing connection
+            self.cleanupConnection(deviceId)
 
-        cm.connect(peripheral, options: nil)
+            self.connectResults[deviceId] = result
+            self.connectedPeripherals[deviceId] = peripheral
+            peripheral.delegate = self
 
-        // Timeout
-        let timeout = Double(timeoutMs) / 1000.0
-        connectTimers[deviceId] = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
-            guard let self = self, self.connectResults[deviceId] != nil else { return }
-            cm.cancelPeripheralConnection(peripheral)
-            self.connectResults.removeValue(forKey: deviceId)?(FlutterError(code: "TIMEOUT", message: "BLE connection timed out", details: nil))
-            self.connectedPeripherals.removeValue(forKey: deviceId)
+            cm.connect(peripheral, options: nil)
+
+            // Timeout
+            let timeout = Double(timeoutMs) / 1000.0
+            self.connectTimers[deviceId] = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
+                guard let self = self, self.connectResults[deviceId] != nil else { return }
+                cm.cancelPeripheralConnection(peripheral)
+                self.connectResults.removeValue(forKey: deviceId)?(FlutterError(code: "TIMEOUT", message: "BLE connection timed out", details: nil))
+                self.connectedPeripherals.removeValue(forKey: deviceId)
+            }
         }
     }
 
@@ -243,8 +293,17 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     // MARK: - CBCentralManagerDelegate
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        // State changes are handled implicitly — if BT turns off,
-        // ongoing connections will trigger didDisconnectPeripheral.
+        // Resolve any pending "wait for powered on" continuations.
+        if central.state != .unknown {
+            let isPoweredOn = central.state == .poweredOn
+            let pending = poweredOnContinuations
+            poweredOnContinuations.removeAll()
+            for continuation in pending {
+                continuation(isPoweredOn)
+            }
+        }
+        // If BT turns off, ongoing connections will trigger
+        // didDisconnectPeripheral automatically.
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
