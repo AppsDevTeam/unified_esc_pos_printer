@@ -58,7 +58,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
 
   Future<void> _startScan() async {
     final Set<PrinterConnectionType> types =
-        _scanFilter != null ? {_scanFilter!} : PrinterConnectionType.values.toSet();
+        _scanFilter != null ? {_scanFilter!} : PrinterConnectionType.supportedOnCurrentPlatform;
 
     setState(() {
       _scanning = true;
@@ -213,12 +213,13 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
                     onTap: () => setState(() => _scanFilter = null),
                   ),
                   for (final PrinterConnectionType type in PrinterConnectionType.values)
-                    ScanFilterChip(
-                      label: filterLabel(type),
-                      icon: filterIcon(type),
-                      selected: _scanFilter == type,
-                      onTap: () => setState(() => _scanFilter = type),
-                    ),
+                    if (type.isSupportedOnCurrentPlatform)
+                      ScanFilterChip(
+                        label: filterLabel(type),
+                        icon: filterIcon(type),
+                        selected: _scanFilter == type,
+                        onTap: () => setState(() => _scanFilter = type),
+                      ),
                 ],
               ),
             ),

@@ -82,7 +82,18 @@ class PrinterManager {
       PrinterConnectionType.usb,
     },
   }) {
-    PrinterLogger.info(_tag, 'Starting scan for types: $types');
+    // Drop connection types that are not supported on the current platform.
+    final Set<PrinterConnectionType> unsupported =
+        types.where((PrinterConnectionType t) => !t.isSupportedOnCurrentPlatform).toSet();
+    if (unsupported.isNotEmpty) {
+      PrinterLogger.warning(
+        _tag,
+        'Skipping unsupported connection types on this platform: $unsupported',
+      );
+    }
+    final Set<PrinterConnectionType> supported = types.difference(unsupported);
+
+    PrinterLogger.info(_tag, 'Starting scan for types: $supported');
 
     // Cancel any previous scan that is still in progress.
     _stopScansSync();
@@ -127,28 +138,28 @@ class PrinterManager {
       _scanSubscriptions.add(sub);
     }
 
-    if (types.contains(PrinterConnectionType.network)) {
+    if (supported.contains(PrinterConnectionType.network)) {
       addScan(
         PrinterConnectionType.network,
         _network.scan(timeout: timeout),
       );
     }
 
-    if (types.contains(PrinterConnectionType.ble)) {
+    if (supported.contains(PrinterConnectionType.ble)) {
       addScan(
         PrinterConnectionType.ble,
         _ble.scan(timeout: timeout),
       );
     }
 
-    if (types.contains(PrinterConnectionType.bluetooth)) {
+    if (supported.contains(PrinterConnectionType.bluetooth)) {
       addScan(
         PrinterConnectionType.bluetooth,
         _bluetooth.scan(timeout: timeout),
       );
     }
 
-    if (types.contains(PrinterConnectionType.usb)) {
+    if (supported.contains(PrinterConnectionType.usb)) {
       addScan(
         PrinterConnectionType.usb,
         _usb.scan(timeout: timeout),
@@ -192,6 +203,12 @@ class PrinterManager {
         'Already connected — disconnecting previous device',
       );
       await disconnect();
+    }
+
+    if (!device.connectionType.isSupportedOnCurrentPlatform) {
+      throw PrinterConnectionException(
+        '${device.connectionType.name} is not supported on this platform',
+      );
     }
 
     PrinterLogger.info(_tag, 'Connecting to ${device.name}');

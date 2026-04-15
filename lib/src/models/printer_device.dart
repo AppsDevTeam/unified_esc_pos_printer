@@ -1,5 +1,31 @@
+import 'dart:io' show Platform;
+
 /// Connection transport types supported by this package.
-enum PrinterConnectionType { usb, bluetooth, ble, network }
+enum PrinterConnectionType {
+  usb,
+  bluetooth,
+  ble,
+  network;
+
+  /// Whether this connection type is supported on the current platform.
+  ///
+  /// - **USB**: Android, Windows, Linux, macOS
+  /// - **Bluetooth Classic**: Android, Windows
+  /// - **BLE**: all platforms
+  /// - **Network**: all platforms
+  bool get isSupportedOnCurrentPlatform => switch (this) {
+        PrinterConnectionType.usb =>
+          Platform.isAndroid || Platform.isWindows || Platform.isLinux || Platform.isMacOS,
+        PrinterConnectionType.bluetooth =>
+          Platform.isAndroid || Platform.isWindows,
+        PrinterConnectionType.ble => true,
+        PrinterConnectionType.network => true,
+      };
+
+  /// The subset of [values] that are supported on the current platform.
+  static Set<PrinterConnectionType> get supportedOnCurrentPlatform =>
+      values.where((PrinterConnectionType t) => t.isSupportedOnCurrentPlatform).toSet();
+}
 
 /// USB platform variants.
 enum UsbPlatform { android, desktop }

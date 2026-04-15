@@ -69,7 +69,7 @@ class _PrinterDemoPageState extends State<PrinterDemoPage> {
   Future<void> _startScan() async {
     final Set<PrinterConnectionType> types = _scanFilter != null
         ? {_scanFilter!}
-        : PrinterConnectionType.values.toSet();
+        : PrinterConnectionType.supportedOnCurrentPlatform;
 
     setState(() {
       _scanning = true;
@@ -199,13 +199,14 @@ class _PrinterDemoPageState extends State<PrinterDemoPage> {
                     selected: _scanFilter == null,
                     onTap: () => setState(() => _scanFilter = null),
                   ),
-                  for (final type in PrinterConnectionType.values)
-                    ScanFilterChip(
-                      label: filterLabel(type),
-                      icon: filterIcon(type),
-                      selected: _scanFilter == type,
-                      onTap: () => setState(() => _scanFilter = type),
-                    ),
+                  for (final PrinterConnectionType type in PrinterConnectionType.values)
+                    if (type.isSupportedOnCurrentPlatform)
+                      ScanFilterChip(
+                        label: filterLabel(type),
+                        icon: filterIcon(type),
+                        selected: _scanFilter == type,
+                        onTap: () => setState(() => _scanFilter = type),
+                      ),
                 ],
               ),
             ),
