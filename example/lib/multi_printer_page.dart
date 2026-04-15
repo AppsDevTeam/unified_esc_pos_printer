@@ -37,7 +37,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
   PrinterConnectionType? _scanFilter;
 
   /// Which test parts to include when printing.
-  final Set<int> _selectedParts = {1, 2, 3, 4, 5, 6};
+  final Set<int> _selectedParts = {7};
 
   static const Map<int, String> _partLabels = {
     1: 'Image & Text',
@@ -46,6 +46,7 @@ class _MultiPrinterPageState extends State<MultiPrinterPage> {
     4: 'Text Raster',
     5: 'Barcodes',
     6: 'QR, Beep & Cashdrawer',
+    7: 'Debug Receipt',
   };
 
   @override

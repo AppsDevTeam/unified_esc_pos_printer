@@ -1,26 +1,20 @@
 PODS:
   - Flutter (1.0.0)
-  - network_info_plus (0.0.1):
-    - Flutter
   - unified_esc_pos_printer (1.0.0):
     - Flutter
 
 DEPENDENCIES:
   - Flutter (from `Flutter`)
-  - network_info_plus (from `.symlinks/plugins/network_info_plus/ios`)
   - unified_esc_pos_printer (from `.symlinks/plugins/unified_esc_pos_printer/ios`)
 
 EXTERNAL SOURCES:
   Flutter:
     :path: Flutter
-  network_info_plus:
-    :path: ".symlinks/plugins/network_info_plus/ios"
   unified_esc_pos_printer:
     :path: ".symlinks/plugins/unified_esc_pos_printer/ios"
 
 SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  network_info_plus: cf61925ab5205dce05a4f0895989afdb6aade5fc
   unified_esc_pos_printer: 0d82ec8d040e13fcd86295454f9d0f39c8a7f7eb
 
 PODFILE CHECKSUM: 3c63482e143d1b91d2d2560aee9fb04ecc74ac7e

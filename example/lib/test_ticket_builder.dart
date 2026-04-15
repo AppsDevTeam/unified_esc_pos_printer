@@ -11,6 +11,7 @@ const Map<int, String> kTestPartLabels = {
   4: 'Text Raster',
   5: 'Barcodes',
   6: 'QR, Beep & Cashdrawer',
+  7: 'Debug Receipt',
 };
 
 /// Builds a test ticket containing only the [selectedParts].
@@ -23,6 +24,7 @@ Future<Ticket> buildTestTicket(Set<int> selectedParts) async {
   if (selectedParts.contains(4)) await _addPart4(ticket);
   if (selectedParts.contains(5)) _addPart5(ticket);
   if (selectedParts.contains(6)) _addPart6(ticket);
+  if (selectedParts.contains(7)) await _addPart7(ticket);
 
   _addFooter(ticket);
   ticket.cut();
@@ -579,6 +581,18 @@ void _addPart6(Ticket ticket) {
     style: const PrintTextStyle(bold: true),
   );
   ticket.openCashDrawer();
+  ticket.emptyLines();
+}
+
+// ── PART 7: Debug Receipt Image ────────────────────────────────────────
+
+Future<void> _addPart7(Ticket ticket) async {
+  final ByteData byteData = await rootBundle.load('assets/debug_receipt.png');
+  final img.Image receipt = img.decodeImage(byteData.buffer.asUint8List())!;
+  ticket.imageRaster(
+    receipt,
+    align: PrintAlign.center,
+  );
   ticket.emptyLines();
 }
 
