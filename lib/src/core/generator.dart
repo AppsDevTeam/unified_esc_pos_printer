@@ -75,7 +75,7 @@ class Generator {
   /// [value] Input number
   /// [bytesNb] The number of bytes to output (1 - 4)
   List<int> _intLowHigh(int value, int bytesNb) {
-    final dynamic maxInput = 256 << (bytesNb * 8) - 1;
+    final int maxInput = (256 << (bytesNb * 8)) - 1;
 
     if (bytesNb < 1 || bytesNb > 4) {
       throw Exception('Can only output 1-4 bytes');
@@ -103,7 +103,13 @@ class Generator {
   /// [image] Image to extract from
   /// [lineHeight] Printed line height in dots
   List<List<int>> _toColumnFormat(Image imgSrc, int lineHeight) {
-    final Image image = Image.from(imgSrc); // make a copy
+    Image image = Image.from(imgSrc); // make a copy
+
+    // Ensure uint8 format — non-uint8 images (e.g. 16-bit PNGs) would produce
+    // wrong byte counts from getBytes().
+    if (image.format != Format.uint8) {
+      image = image.convert(format: Format.uint8);
+    }
 
     // Determine new width: closest integer that is divisible by lineHeight
     final int widthPx = (image.width + lineHeight) - (image.width % lineHeight);
@@ -177,34 +183,38 @@ class Generator {
 
   /// Image rasterization
   List<int> _toRasterFormat(Image imgSrc) {
-    final Image image = Image.from(imgSrc); // Make a copy
+    Image image = Image.from(imgSrc); // Make a copy
+
+    // Ensure uint8 format — non-uint8 images (e.g. 16-bit PNGs) would produce
+    // pixel values > 255 and wrong byte counts from getBytes().
+    if (image.format != Format.uint8) {
+      image = image.convert(format: Format.uint8);
+    }
+
     final int widthPx = image.width;
     final int heightPx = image.height;
 
     grayscale(image);
     invert(image);
 
-    // R/G/B channels are same -> keep only one channel
-    List<int> oneChannelBytes = [];
+    // R/G/B channels are same after grayscale → keep only the R channel.
     final List<int> buffer = image.getBytes(order: ChannelOrder.rgba);
 
-    for (int i = 0; i < buffer.length; i += 4) {
-      oneChannelBytes.add(buffer[i]);
-    }
+    // Target width rounded up to the nearest multiple of 8.
+    final int targetWidth =
+        (widthPx % 8 == 0) ? widthPx : widthPx + (8 - widthPx % 8);
 
-    // Add some empty pixels at the end of each line (to make the width divisible by 8)
-    if (widthPx % 8 != 0) {
-      final targetWidth = (widthPx + 8) - (widthPx % 8);
-      final missingPx = targetWidth - widthPx;
-      final extra = Uint8List(missingPx);
+    final List<int> oneChannelBytes = List<int>.filled(
+      heightPx * targetWidth,
+      0,
+    );
 
-      oneChannelBytes = List<int>.filled(heightPx * targetWidth, 0);
-
-      for (int i = 0; i < heightPx; i++) {
-        // Corrected position calculation
-        final pos = (i * widthPx) + i * missingPx;
-        oneChannelBytes.insertAll(pos, extra);
+    for (int row = 0; row < heightPx; row++) {
+      for (int col = 0; col < widthPx; col++) {
+        final int srcIdx = (row * widthPx + col) * 4; // RGBA stride
+        oneChannelBytes[row * targetWidth + col] = buffer[srcIdx];
       }
+      // Remaining columns (widthPx..targetWidth-1) stay 0 (padding).
     }
 
     // Pack bits into bytes
