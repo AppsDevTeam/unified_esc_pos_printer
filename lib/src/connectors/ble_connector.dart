@@ -28,6 +28,27 @@ const String _tag = 'BLE';
 /// **Permissions:** Automatically requests Bluetooth permissions when
 /// scanning or connecting. Throws [PrinterPermissionException] if denied.
 class BleConnector extends PrinterConnector<BlePrinterDevice> {
+  /// Creates a BLE connector with optional flow-control settings.
+  ///
+  /// [maxChunkSize] — if set, limits the per-write payload to at most this
+  /// many bytes (clamped to the negotiated MTU payload). Smaller chunks give
+  /// the printer more time to drain its receive buffer between writes.
+  ///
+  /// [chunkDelay] — if set, the connector waits this long after every chunk
+  /// write before sending the next one. A value of 5–20 ms is usually enough
+  /// to eliminate stepped printing without noticeably slowing throughput.
+  BleConnector({
+    this.maxChunkSize,
+    this.chunkDelay,
+  });
+
+  /// Maximum bytes per BLE write operation, or `null` to use the full
+  /// negotiated MTU payload.
+  final int? maxChunkSize;
+
+  /// Optional delay inserted after each chunk write for throttling.
+  final Duration? chunkDelay;
+
   final BluetoothPlatformChannel _platform = BluetoothPlatformChannel.instance;
 
   int _mtuPayload = 20;
@@ -254,20 +275,32 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
 
     _setState(PrinterConnectionState.printing);
 
-    final int chunks = (bytes.length / _mtuPayload).ceil();
+    // Effective chunk size: negotiated MTU payload, optionally capped by
+    // the user-configured maxChunkSize.
+    final int effectiveChunkSize = maxChunkSize != null
+        ? _mtuPayload.clamp(1, maxChunkSize!)
+        : _mtuPayload;
+
+    final int chunks = (bytes.length / effectiveChunkSize).ceil();
     PrinterLogger.debug(
       _tag,
-      'Writing ${bytes.length} bytes in $chunks chunk(s)',
+      'Writing ${bytes.length} bytes in $chunks chunk(s) '
+      '(chunkSize: $effectiveChunkSize, delay: ${chunkDelay?.inMilliseconds ?? 0}ms)',
     );
 
     try {
-      for (int i = 0; i < bytes.length; i += _mtuPayload) {
-        final int end = (i + _mtuPayload).clamp(0, bytes.length);
+      for (int i = 0; i < bytes.length; i += effectiveChunkSize) {
+        final int end = (i + effectiveChunkSize).clamp(0, bytes.length);
         await _platform.bleWrite(
           deviceId: deviceId,
           data: Uint8List.fromList(bytes.sublist(i, end)),
           withoutResponse: _writeWithoutResponse,
         );
+
+        // Throttle: wait between chunks to let the printer drain its buffer.
+        if (chunkDelay != null && end < bytes.length) {
+          await Future<void>.delayed(chunkDelay!);
+        }
       }
 
       await postWriteStatusQuery(
