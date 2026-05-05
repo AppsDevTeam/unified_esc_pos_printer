@@ -1,6 +1,6 @@
 name: unified_esc_pos_printer
 description: Unified ESC/POS thermal printer package for Flutter. Supports USB, Bluetooth Classic, BLE, and Network connections with a single PrinterManager API
-version: 3.6.0
+version: 3.6.1
 publish_to: none
 homepage: https://github.com/elrizwiraswara/unified_esc_pos_printer
 repository: https://github.com/elrizwiraswara/unified_esc_pos_printer
@@ -23,7 +23,11 @@ dependencies:
       ref: v0.7.0
 
   # USB — Windows / Linux / macOS serial port (wraps libserialport)
-  flutter_libserialport: ^0.6.0
+  # AppsDevTeam fork with 16 KB page-size aligned Android .so (Android 16 requirement)
+  flutter_libserialport:
+    git:
+      url: https://github.com/AppsDevTeam/flutter_libserialport.git
+      ref: v0.6.1
 
 dev_dependencies:
   flutter_test:
