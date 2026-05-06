@@ -329,11 +329,21 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
   Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) async {
     _assertState(PrinterConnectionState.connected, 'queryStatusByte');
     final String address = _connectedAddress ?? '';
-    return _platform.btQueryStatus(
-      address: address,
-      n: n,
-      timeoutMs: timeoutMs,
-    );
+    try {
+      return await _platform.btQueryStatus(
+        address: address,
+        n: n,
+        timeoutMs: timeoutMs,
+      );
+    } on MissingPluginException {
+      // Windows native plugin does not implement btQueryStatus — treat as
+      // "transport cannot read back" rather than letting the exception
+      // bubble up and break the print.
+      return -1;
+    } on PlatformException catch (e) {
+      PrinterLogger.warning(_tag, 'btQueryStatus failed: ${e.message}');
+      return -1;
+    }
   }
 
   // ── Disconnection ──────────────────────────────────────────────────────────
