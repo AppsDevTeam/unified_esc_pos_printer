@@ -21,6 +21,10 @@ const String _tag = 'USB-Android';
 /// 115200 baud 8N1 communication (standard for ESC/POS USB printers).
 class UsbConnectorImpl extends UsbConnectorBase {
   UsbPort? _port;
+  // Broadcast view of [_port.inputStream] — see network_connector for the
+  // reason. Plain port.inputStream is single-subscription, so re-listening
+  // (e.g. probe + verifyAfterWrite) throws.
+  Stream<Uint8List>? _inboundStream;
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
   bool? _supportsRealtimeStatus;
@@ -153,6 +157,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
       await openPort.write(Uint8List.fromList(cInit.codeUnits));
 
       _port = port;
+      _inboundStream = port.inputStream?.asBroadcastStream();
       PrinterLogger.info(_tag, 'Connected to ${device.identifier}');
       _setState(PrinterConnectionState.connected);
 
@@ -225,10 +230,8 @@ class UsbConnectorImpl extends UsbConnectorBase {
     _assertState(PrinterConnectionState.connected, 'queryStatusByte');
 
     final UsbPort? port = _port;
-    if (port == null) return -1;
-
-    final Stream<Uint8List>? input = port.inputStream;
-    if (input == null) return -1;
+    final Stream<Uint8List>? input = _inboundStream;
+    if (port == null || input == null) return -1;
 
     final Completer<int> completer = Completer<int>();
     final StreamSubscription<Uint8List> sub = input.listen(
@@ -261,6 +264,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
       await _port?.close();
     } finally {
       _port = null;
+      _inboundStream = null;
       _supportsRealtimeStatus = null;
       _setState(PrinterConnectionState.disconnected);
     }

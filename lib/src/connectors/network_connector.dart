@@ -28,6 +28,11 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
   final int scanPort;
 
   Socket? _socket;
+  // Broadcast view of [_socket] so multiple callers (queryStatusByte from
+  // verifyAfterWrite, the connect-time probe, …) can listen sequentially.
+  // Plain Socket is single-subscription; without this every second query
+  // throws "Stream has already been listened to".
+  Stream<List<int>>? _inboundStream;
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
   bool? _supportsRealtimeStatus;
   final StreamController<PrinterConnectionState> _stateController =
@@ -181,6 +186,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
         device.port,
         timeout: timeout,
       );
+      _inboundStream = _socket!.asBroadcastStream();
 
       // Send ESC @ to initialise the printer on connect.
       _socket!.add(cInit.codeUnits);
@@ -266,12 +272,13 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     _assertState(PrinterConnectionState.connected, 'queryStatusByte');
 
     final Socket? sock = _socket;
-    if (sock == null) return -1;
+    final Stream<List<int>>? inbound = _inboundStream;
+    if (sock == null || inbound == null) return -1;
 
     final Completer<int> completer = Completer<int>();
     StreamSubscription<List<int>>? sub;
 
-    sub = sock.listen(
+    sub = inbound.listen(
       (List<int> data) {
         if (!completer.isCompleted && data.isNotEmpty) {
           completer.complete(data.first);
@@ -314,6 +321,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     } finally {
       _socket?.destroy();
       _socket = null;
+      _inboundStream = null;
       _supportsRealtimeStatus = null;
       _setState(PrinterConnectionState.disconnected);
     }
