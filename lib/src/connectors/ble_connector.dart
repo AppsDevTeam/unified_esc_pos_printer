@@ -303,23 +303,20 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
         }
       }
 
-      await verifyAfterWrite(
-        queryStatusByteFn: (int n, int timeoutMs) =>
-            queryStatusByte(n, timeoutMs: timeoutMs),
-        bytesWritten: bytes.length,
-        tag: _tag,
-      );
-
       _setState(PrinterConnectionState.connected);
-    } on PrinterDeviceException {
-      _setState(PrinterConnectionState.connected);
-      rethrow;
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('BLE write failed', cause: e);
     }
+
+    await verifyAfterWrite(
+      queryStatusByteFn: (int n, int timeoutMs) =>
+          queryStatusByte(n, timeoutMs: timeoutMs),
+      bytesWritten: bytes.length,
+      tag: _tag,
+    );
   }
 
   @override

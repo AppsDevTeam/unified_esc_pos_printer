@@ -130,23 +130,20 @@ class UsbConnectorImpl extends UsbConnectorBase {
       PrinterLogger.debug(_tag, 'Writing ${bytes.length} bytes');
       _port!.write(Uint8List.fromList(bytes));
 
-      await verifyAfterWrite(
-        queryStatusByteFn: (int n, int timeoutMs) =>
-            queryStatusByte(n, timeoutMs: timeoutMs),
-        bytesWritten: bytes.length,
-        tag: _tag,
-      );
-
       _setState(PrinterConnectionState.connected);
-    } on PrinterDeviceException {
-      _setState(PrinterConnectionState.connected);
-      rethrow;
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('USB serial write failed', cause: e);
     }
+
+    await verifyAfterWrite(
+      queryStatusByteFn: (int n, int timeoutMs) =>
+          queryStatusByte(n, timeoutMs: timeoutMs),
+      bytesWritten: bytes.length,
+      tag: _tag,
+    );
   }
 
   @override

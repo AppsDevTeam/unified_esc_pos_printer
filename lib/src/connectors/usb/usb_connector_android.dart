@@ -178,17 +178,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
       PrinterLogger.debug(_tag, 'Writing ${bytes.length} bytes');
       await _port!.write(Uint8List.fromList(bytes));
 
-      await verifyAfterWrite(
-        queryStatusByteFn: (int n, int timeoutMs) =>
-            queryStatusByte(n, timeoutMs: timeoutMs),
-        bytesWritten: bytes.length,
-        tag: _tag,
-      );
-
       _setState(PrinterConnectionState.connected);
-    } on PrinterDeviceException {
-      _setState(PrinterConnectionState.connected);
-      rethrow;
     } on PlatformException catch (e) {
       final UsbException usbError = UsbException.fromPlatformException(e);
       PrinterLogger.error(_tag, 'Write failed: $usbError');
@@ -201,6 +191,13 @@ class UsbConnectorImpl extends UsbConnectorBase {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('USB write failed', cause: e);
     }
+
+    await verifyAfterWrite(
+      queryStatusByteFn: (int n, int timeoutMs) =>
+          queryStatusByte(n, timeoutMs: timeoutMs),
+      bytesWritten: bytes.length,
+      tag: _tag,
+    );
   }
 
   @override

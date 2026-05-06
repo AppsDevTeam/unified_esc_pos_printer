@@ -220,25 +220,25 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       _socket!.add(bytes);
       await _socket!.flush();
 
-      await verifyAfterWrite(
-        queryStatusByteFn: (int n, int timeoutMs) =>
-            queryStatusByte(n, timeoutMs: timeoutMs),
-        bytesWritten: bytes.length,
-        tag: _tag,
-      );
-
+      // Bytes are flushed — the write phase is over.  Return to 'connected'
+      // before verifying so that queryStatusByte's state assertion passes.
       _setState(PrinterConnectionState.connected);
-    } on PrinterDeviceException {
-      // Hardware problem — the bytes went through, the printer just can't
-      // print right now.  Keep the connection state usable for the next try.
-      _setState(PrinterConnectionState.connected);
-      rethrow;
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('Failed to write bytes to printer', cause: e);
     }
+
+    // Outside the write try/catch: a PrinterDeviceException raised here
+    // means the bytes went through but the printer reports a hardware
+    // problem — we want it to propagate without flipping us to 'error'.
+    await verifyAfterWrite(
+      queryStatusByteFn: (int n, int timeoutMs) =>
+          queryStatusByte(n, timeoutMs: timeoutMs),
+      bytesWritten: bytes.length,
+      tag: _tag,
+    );
   }
 
   @override
