@@ -1,3 +1,17 @@
+## 3.7.0
+
+- Add typed exception subclasses for common failure modes:
+  - `PrinterTimeoutException`, `PrinterUnreachableException`, `PrinterPlatformUnsupportedException`, `PrinterDisconnectedDuringOperationException` under `PrinterConnectionException`
+  - `PrinterNetworkUnavailableException` under `PrinterScanException`
+  - new `PrinterDeviceException` for hardware error conditions reported by the printer (cover open, paper out, paper jam, overheat, cutter error, …) carrying a `PrinterStatusDetail`
+- Add `PrinterStatusDetail` model parsing DLE EOT 1/2/3/4 responses: `coverOpen`, `paperEnd`/`paperNearEnd`, `paperFedByButton`, `mechanicalError`/`cutterError`, `unrecoverableError`/`autoRecoverableError`, …
+- Add `PrinterConnector.queryStatusByte(n, …)` and `PrinterManager.queryStatusDetail()` for issuing arbitrary DLE EOT real-time status queries
+- Add connect-time DLE EOT probe and `PrinterConnector.supportsRealtimeStatus` so post-write timeouts are only escalated on printers that actually implement the protocol
+- Post-write status check now throws `PrinterDeviceException` with detailed flags when the printer reports an error condition; previously these were only logged
+- Bluetooth Classic native (Android): `btQueryStatus` accepts `n` parameter for DLE EOT 1..4 queries; Windows (no-op) and other transports gracefully degrade to `-1`
+- Use a broadcast view of `Socket` / `UsbPort.inputStream` so the connect-time probe and post-write verify can both read responses without "Stream has already been listened to"
+- Network connector now performs post-write status verification (was previously skipped)
+
 ## 3.6.1
 
 - Switch `flutter_libserialport` to AppsDevTeam fork v0.6.1 with 16 KB page-size aligned Android `.so` (required by Android 16, supported on Android 15)
