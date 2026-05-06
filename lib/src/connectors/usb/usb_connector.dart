@@ -66,6 +66,13 @@ class UsbConnector extends PrinterConnector<UsbPrinterDevice> {
       _impl.queryStatus(timeoutMs: timeoutMs);
 
   @override
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) =>
+      _impl.queryStatusByte(n, timeoutMs: timeoutMs);
+
+  @override
+  bool? get supportsRealtimeStatus => _impl.supportsRealtimeStatus;
+
+  @override
   Future<void> disconnect() => _impl.disconnect();
 
   @override

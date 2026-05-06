@@ -39,6 +39,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
   StreamSubscription<Map<String, dynamic>>? _connectionSub;
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
+  bool? _supportsRealtimeStatus;
   final StreamController<PrinterConnectionState> _stateController =
       StreamController<PrinterConnectionState>.broadcast();
 
@@ -47,6 +48,9 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
 
   @override
   PrinterConnectionState get state => _state;
+
+  @override
+  bool? get supportsRealtimeStatus => _supportsRealtimeStatus;
 
   @override
   Stream<List<BluetoothPrinterDevice>> scan({
@@ -59,7 +63,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       PrinterLogger.error(_tag, 'Unsupported platform: ${Platform.operatingSystem}');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
-      throw const PrinterConnectionException(
+      throw const PrinterPlatformUnsupportedException(
         'Classic Bluetooth (SPP) is only supported on Android and Windows. '
         'Use BleConnector for other platforms.',
       );
@@ -194,7 +198,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       PrinterLogger.error(_tag, 'Unsupported platform: ${Platform.operatingSystem}');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
-      throw const PrinterConnectionException(
+      throw const PrinterPlatformUnsupportedException(
         'Classic Bluetooth (SPP) is only supported on Android and Windows. '
         'Use BleConnector for other platforms.',
       );
@@ -232,6 +236,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
         if (event['state'] == 'disconnected' && _state != PrinterConnectionState.disconnected) {
           PrinterLogger.warning(_tag, 'Remote disconnection detected');
           _connectedAddress = null;
+          _supportsRealtimeStatus = null;
           _connectionSub?.cancel();
           _connectionSub = null;
           _setState(PrinterConnectionState.error);
@@ -244,6 +249,12 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
         'Connected to ${device.name} (${device.address})',
       );
       _setState(PrinterConnectionState.connected);
+
+      _supportsRealtimeStatus = await probeRealtimeStatus(
+        queryStatusByteFn: (int n, int timeoutMs) =>
+            queryStatusByte(n, timeoutMs: timeoutMs),
+        tag: _tag,
+      );
     } on TimeoutException catch (e) {
       PrinterLogger.error(
         _tag,
@@ -251,7 +262,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       );
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
-      throw PrinterConnectionException(
+      throw PrinterTimeoutException(
         'Bluetooth connection to ${device.address} timed out',
         cause: e,
       );
@@ -288,15 +299,6 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
         );
       }
 
-      await postWriteStatusQuery(
-        queryFn: (int timeoutMs) => _platform.btQueryStatus(
-          address: address,
-          timeoutMs: timeoutMs,
-        ),
-        bytesWritten: bytes.length,
-        tag: _tag,
-      );
-
       _setState(PrinterConnectionState.connected);
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
@@ -304,21 +306,44 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('Bluetooth write failed', cause: e);
     }
+
+    await verifyAfterWrite(
+      queryStatusByteFn: (int n, int timeoutMs) =>
+          queryStatusByte(n, timeoutMs: timeoutMs),
+      bytesWritten: bytes.length,
+      supportsRealtimeStatus: _supportsRealtimeStatus,
+      tag: _tag,
+    );
   }
 
   @override
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
-    _assertState(PrinterConnectionState.connected, 'queryStatus');
-    final String address = _connectedAddress ?? '';
-    final int rawStatus = await _platform.btQueryStatus(
-      address: address,
-      timeoutMs: timeoutMs,
-    );
-    final PrinterStatus status = rawStatus >= 0
-        ? PrinterStatus.fromByte(rawStatus)
-        : PrinterStatus.timeout;
+    final int raw = await queryStatusByte(1, timeoutMs: timeoutMs);
+    final PrinterStatus status =
+        raw >= 0 ? PrinterStatus.fromByte(raw) : PrinterStatus.timeout;
     PrinterLogger.debug(_tag, 'queryStatus: $status');
     return status;
+  }
+
+  @override
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) async {
+    _assertState(PrinterConnectionState.connected, 'queryStatusByte');
+    final String address = _connectedAddress ?? '';
+    try {
+      return await _platform.btQueryStatus(
+        address: address,
+        n: n,
+        timeoutMs: timeoutMs,
+      );
+    } on MissingPluginException {
+      // Windows native plugin does not implement btQueryStatus — treat as
+      // "transport cannot read back" rather than letting the exception
+      // bubble up and break the print.
+      return -1;
+    } on PlatformException catch (e) {
+      PrinterLogger.warning(_tag, 'btQueryStatus failed: ${e.message}');
+      return -1;
+    }
   }
 
   // ── Disconnection ──────────────────────────────────────────────────────────
@@ -336,6 +361,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     try {
       final String? address = _connectedAddress;
       _connectedAddress = null;
+      _supportsRealtimeStatus = null;
       if (address != null) {
         await _platform.btDisconnect(address: address);
       }

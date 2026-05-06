@@ -8,6 +8,7 @@ import '../models/printer_device.dart';
 
 import '../models/printer_status.dart';
 import '../utils/printer_logger.dart';
+import 'post_write_status.dart';
 import 'printer_connector.dart';
 
 const String _tag = 'Network';
@@ -27,7 +28,13 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
   final int scanPort;
 
   Socket? _socket;
+  // Broadcast view of [_socket] so multiple callers (queryStatusByte from
+  // verifyAfterWrite, the connect-time probe, …) can listen sequentially.
+  // Plain Socket is single-subscription; without this every second query
+  // throws "Stream has already been listened to".
+  Stream<List<int>>? _inboundStream;
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
+  bool? _supportsRealtimeStatus;
   final StreamController<PrinterConnectionState> _stateController =
       StreamController<PrinterConnectionState>.broadcast();
 
@@ -36,6 +43,9 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
 
   @override
   PrinterConnectionState get state => _state;
+
+  @override
+  bool? get supportsRealtimeStatus => _supportsRealtimeStatus;
 
   @override
   Stream<List<NetworkPrinterDevice>> scan({
@@ -72,7 +82,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     if (localIp == null || localIp.isEmpty) {
       PrinterLogger.error(_tag, 'No usable local IP found — aborting scan');
       _setState(PrinterConnectionState.disconnected);
-      throw const PrinterScanException(
+      throw const PrinterNetworkUnavailableException(
         'Cannot determine local WiFi IP address. '
         'Ensure the device is connected to a WiFi network and '
         'required permissions are granted.',
@@ -176,6 +186,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
         device.port,
         timeout: timeout,
       );
+      _inboundStream = _socket!.asBroadcastStream();
 
       // Send ESC @ to initialise the printer on connect.
       _socket!.add(cInit.codeUnits);
@@ -183,6 +194,12 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
 
       PrinterLogger.info(_tag, 'Connected to ${device.host}:${device.port}');
       _setState(PrinterConnectionState.connected);
+
+      _supportsRealtimeStatus = await probeRealtimeStatus(
+        queryStatusByteFn: (int n, int timeoutMs) =>
+            queryStatusByte(n, timeoutMs: timeoutMs),
+        tag: _tag,
+      );
     } on SocketException catch (e) {
       PrinterLogger.error(
         _tag,
@@ -190,7 +207,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       );
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
-      throw PrinterConnectionException(
+      throw PrinterUnreachableException(
         'Cannot connect to ${device.host}:${device.port}',
         cause: e,
       );
@@ -201,7 +218,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       );
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
-      throw PrinterConnectionException(
+      throw PrinterTimeoutException(
         'Connection to ${device.host}:${device.port} timed out',
         cause: e,
       );
@@ -219,6 +236,8 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       _socket!.add(bytes);
       await _socket!.flush();
 
+      // Bytes are flushed — the write phase is over.  Return to 'connected'
+      // before verifying so that queryStatusByte's state assertion passes.
       _setState(PrinterConnectionState.connected);
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
@@ -226,19 +245,40 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('Failed to write bytes to printer', cause: e);
     }
+
+    // Outside the write try/catch: a PrinterDeviceException raised here
+    // means the bytes went through but the printer reports a hardware
+    // problem — we want it to propagate without flipping us to 'error'.
+    await verifyAfterWrite(
+      queryStatusByteFn: (int n, int timeoutMs) =>
+          queryStatusByte(n, timeoutMs: timeoutMs),
+      bytesWritten: bytes.length,
+      supportsRealtimeStatus: _supportsRealtimeStatus,
+      tag: _tag,
+    );
   }
 
   @override
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
-    _assertState(PrinterConnectionState.connected, 'queryStatus');
+    final int raw = await queryStatusByte(1, timeoutMs: timeoutMs);
+    final PrinterStatus status =
+        raw >= 0 ? PrinterStatus.fromByte(raw) : PrinterStatus.timeout;
+    PrinterLogger.debug(_tag, 'queryStatus: $status');
+    return status;
+  }
+
+  @override
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) async {
+    _assertState(PrinterConnectionState.connected, 'queryStatusByte');
 
     final Socket? sock = _socket;
-    if (sock == null) return PrinterStatus.timeout;
+    final Stream<List<int>>? inbound = _inboundStream;
+    if (sock == null || inbound == null) return -1;
 
     final Completer<int> completer = Completer<int>();
     StreamSubscription<List<int>>? sub;
 
-    sub = sock.listen(
+    sub = inbound.listen(
       (List<int> data) {
         if (!completer.isCompleted && data.isNotEmpty) {
           completer.complete(data.first);
@@ -253,8 +293,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       },
     );
 
-    // Send DLE EOT n=1 (printer status)
-    sock.add(const [0x10, 0x04, 0x01]);
+    sock.add([0x10, 0x04, n & 0xFF]);
     await sock.flush();
 
     final Future<int> timeoutFuture = Future<int>.delayed(
@@ -264,12 +303,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
 
     final int rawStatus = await Future.any([completer.future, timeoutFuture]);
     await sub.cancel();
-
-    final PrinterStatus status = rawStatus >= 0
-        ? PrinterStatus.fromByte(rawStatus)
-        : PrinterStatus.timeout;
-    PrinterLogger.debug(_tag, 'queryStatus: $status');
-    return status;
+    return rawStatus;
   }
 
   // ── Disconnection ──────────────────────────────────────────────────────────
@@ -287,6 +321,8 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     } finally {
       _socket?.destroy();
       _socket = null;
+      _inboundStream = null;
+      _supportsRealtimeStatus = null;
       _setState(PrinterConnectionState.disconnected);
     }
   }

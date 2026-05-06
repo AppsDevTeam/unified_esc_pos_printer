@@ -291,10 +291,13 @@ class BluetoothClassicManager(private val context: Context) {
         }.start()
     }
 
-    /// Sends DLE EOT (real-time status query) and waits for the printer's
-    /// single-byte response.  Because BT SPP is a sequential stream the
-    /// printer can only receive this command after all preceding data.
-    fun queryStatus(address: String, timeoutMs: Int, result: MethodChannel.Result) {
+    /// Sends DLE EOT n=[n] (real-time status query) and waits for the
+    /// printer's single-byte response.  Because BT SPP is a sequential
+    /// stream the printer can only receive this command after all preceding
+    /// data.  [n] selects which status the printer should report:
+    ///   1 — printer status, 2 — offline cause,
+    ///   3 — error cause,    4 — paper sensor.
+    fun queryStatus(address: String, n: Int, timeoutMs: Int, result: MethodChannel.Result) {
         val os = outputStreams[address]
         val sock = sockets[address]
         if (os == null || sock == null) {
@@ -312,20 +315,20 @@ class BluetoothClassicManager(private val context: Context) {
                 val input = sock.inputStream
                 while (input.available() > 0) { input.read() }
 
-                os.write(byteArrayOf(0x10, 0x04, 0x01))
+                os.write(byteArrayOf(0x10, 0x04, (n and 0xFF).toByte()))
                 os.flush()
 
                 val deadline = System.currentTimeMillis() + timeoutMs
                 while (System.currentTimeMillis() < deadline) {
                     if (input.available() > 0) {
                         val status = input.read()
-                        Log.d("PrinterSDK", "BT queryStatus: response 0x${status.toString(16)} ($address)")
+                        Log.d("PrinterSDK", "BT queryStatus(n=$n): response 0x${status.toString(16)} ($address)")
                         mainHandler.post { result.success(status) }
                         return@Thread
                     }
                     Thread.sleep(50)
                 }
-                Log.d("PrinterSDK", "BT queryStatus: timeout (${timeoutMs}ms) ($address)")
+                Log.d("PrinterSDK", "BT queryStatus(n=$n): timeout (${timeoutMs}ms) ($address)")
                 mainHandler.post { result.success(-1) }
             } catch (e: IOException) {
                 mainHandler.post { result.error("QUERY_FAILED", "Bluetooth Classic status query failed", e.message) }

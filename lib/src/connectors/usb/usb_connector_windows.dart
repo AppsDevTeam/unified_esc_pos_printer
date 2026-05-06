@@ -30,6 +30,10 @@ class UsbConnectorImpl extends UsbConnectorBase {
   @override
   PrinterConnectionState get state => _state;
 
+  /// Windows Print Spooler is one-way — no DLE EOT readback is possible.
+  @override
+  bool? get supportsRealtimeStatus => null;
+
   @override
   Stream<List<UsbPrinterDevice>> scan({
     Duration timeout = const Duration(seconds: 5),
@@ -110,6 +114,12 @@ class UsbConnectorImpl extends UsbConnectorBase {
   @override
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
     return PrinterStatus.unsupported;
+  }
+
+  @override
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) async {
+    // Windows Print Spooler is one-way — DLE EOT response cannot be read.
+    return -1;
   }
 
   @override

@@ -32,6 +32,12 @@ abstract class UsbConnectorBase extends PrinterConnector<UsbPrinterDevice> {
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000});
 
   @override
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000});
+
+  @override
+  bool? get supportsRealtimeStatus;
+
+  @override
   Future<void> disconnect();
 
   @override

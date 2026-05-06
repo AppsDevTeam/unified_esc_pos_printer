@@ -9,6 +9,7 @@ import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
 import '../../models/printer_status.dart';
 import '../../utils/printer_logger.dart';
+import '../post_write_status.dart';
 import 'usb_connector_interface.dart';
 
 const String _tag = 'USB-Android';
@@ -20,8 +21,13 @@ const String _tag = 'USB-Android';
 /// 115200 baud 8N1 communication (standard for ESC/POS USB printers).
 class UsbConnectorImpl extends UsbConnectorBase {
   UsbPort? _port;
+  // Broadcast view of [_port.inputStream] — see network_connector for the
+  // reason. Plain port.inputStream is single-subscription, so re-listening
+  // (e.g. probe + verifyAfterWrite) throws.
+  Stream<Uint8List>? _inboundStream;
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
+  bool? _supportsRealtimeStatus;
   final StreamController<PrinterConnectionState> _stateController =
       StreamController<PrinterConnectionState>.broadcast();
 
@@ -30,6 +36,9 @@ class UsbConnectorImpl extends UsbConnectorBase {
 
   @override
   PrinterConnectionState get state => _state;
+
+  @override
+  bool? get supportsRealtimeStatus => _supportsRealtimeStatus;
 
   @override
   Stream<List<UsbPrinterDevice>> scan({
@@ -148,8 +157,15 @@ class UsbConnectorImpl extends UsbConnectorBase {
       await openPort.write(Uint8List.fromList(cInit.codeUnits));
 
       _port = port;
+      _inboundStream = port.inputStream?.asBroadcastStream();
       PrinterLogger.info(_tag, 'Connected to ${device.identifier}');
       _setState(PrinterConnectionState.connected);
+
+      _supportsRealtimeStatus = await probeRealtimeStatus(
+        queryStatusByteFn: (int n, int timeoutMs) =>
+            queryStatusByte(n, timeoutMs: timeoutMs),
+        tag: _tag,
+      );
     } on PlatformException catch (e) {
       final UsbException usbError = UsbException.fromPlatformException(e);
       PrinterLogger.error(_tag, 'USB error: $usbError');
@@ -176,6 +192,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
     try {
       PrinterLogger.debug(_tag, 'Writing ${bytes.length} bytes');
       await _port!.write(Uint8List.fromList(bytes));
+
       _setState(PrinterConnectionState.connected);
     } on PlatformException catch (e) {
       final UsbException usbError = UsbException.fromPlatformException(e);
@@ -189,17 +206,32 @@ class UsbConnectorImpl extends UsbConnectorBase {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('USB write failed', cause: e);
     }
+
+    await verifyAfterWrite(
+      queryStatusByteFn: (int n, int timeoutMs) =>
+          queryStatusByte(n, timeoutMs: timeoutMs),
+      bytesWritten: bytes.length,
+      supportsRealtimeStatus: _supportsRealtimeStatus,
+      tag: _tag,
+    );
   }
 
   @override
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
-    _assertState(PrinterConnectionState.connected, 'queryStatus');
+    final int raw = await queryStatusByte(1, timeoutMs: timeoutMs);
+    final PrinterStatus status =
+        raw >= 0 ? PrinterStatus.fromByte(raw) : PrinterStatus.timeout;
+    PrinterLogger.debug(_tag, 'queryStatus: $status');
+    return status;
+  }
+
+  @override
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) async {
+    _assertState(PrinterConnectionState.connected, 'queryStatusByte');
 
     final UsbPort? port = _port;
-    if (port == null) return PrinterStatus.timeout;
-
-    final Stream<Uint8List>? input = port.inputStream;
-    if (input == null) return PrinterStatus.timeout;
+    final Stream<Uint8List>? input = _inboundStream;
+    if (port == null || input == null) return -1;
 
     final Completer<int> completer = Completer<int>();
     final StreamSubscription<Uint8List> sub = input.listen(
@@ -213,20 +245,14 @@ class UsbConnectorImpl extends UsbConnectorBase {
       },
     );
 
-    // Send DLE EOT n=1 (printer status)
-    await port.write(Uint8List.fromList(const [0x10, 0x04, 0x01]));
+    await port.write(Uint8List.fromList([0x10, 0x04, n & 0xFF]));
 
     final int rawStatus = await Future.any<int>([
       completer.future,
       Future<int>.delayed(Duration(milliseconds: timeoutMs), () => -1),
     ]);
     await sub.cancel();
-
-    final PrinterStatus status = rawStatus >= 0
-        ? PrinterStatus.fromByte(rawStatus)
-        : PrinterStatus.timeout;
-    PrinterLogger.debug(_tag, 'queryStatus: $status');
-    return status;
+    return rawStatus;
   }
 
   @override
@@ -238,6 +264,8 @@ class UsbConnectorImpl extends UsbConnectorBase {
       await _port?.close();
     } finally {
       _port = null;
+      _inboundStream = null;
+      _supportsRealtimeStatus = null;
       _setState(PrinterConnectionState.disconnected);
     }
   }
@@ -266,7 +294,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
   PrinterException _mapUsbException(UsbException error, String context) {
     switch (error.code) {
       case UsbErrorCode.deviceDisconnected:
-        return PrinterConnectionException(
+        return PrinterDisconnectedDuringOperationException(
           'USB device disconnected during $context',
           cause: error,
         );
@@ -282,7 +310,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
         );
       case UsbErrorCode.deviceNotOpen:
       case UsbErrorCode.deviceOpenFailed:
-        return PrinterConnectionException(
+        return PrinterUnreachableException(
           'USB device could not be opened during $context',
           cause: error,
         );
@@ -293,7 +321,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
         );
       case UsbErrorCode.noEndpointFound:
       case UsbErrorCode.interfaceClaimFailed:
-        return PrinterConnectionException(
+        return PrinterUnreachableException(
           'USB interface error during $context: ${error.message}',
           cause: error,
         );
