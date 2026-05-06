@@ -29,6 +29,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
 
   Socket? _socket;
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
+  bool? _supportsRealtimeStatus;
   final StreamController<PrinterConnectionState> _stateController =
       StreamController<PrinterConnectionState>.broadcast();
 
@@ -37,6 +38,9 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
 
   @override
   PrinterConnectionState get state => _state;
+
+  @override
+  bool? get supportsRealtimeStatus => _supportsRealtimeStatus;
 
   @override
   Stream<List<NetworkPrinterDevice>> scan({
@@ -184,6 +188,12 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
 
       PrinterLogger.info(_tag, 'Connected to ${device.host}:${device.port}');
       _setState(PrinterConnectionState.connected);
+
+      _supportsRealtimeStatus = await probeRealtimeStatus(
+        queryStatusByteFn: (int n, int timeoutMs) =>
+            queryStatusByte(n, timeoutMs: timeoutMs),
+        tag: _tag,
+      );
     } on SocketException catch (e) {
       PrinterLogger.error(
         _tag,
@@ -237,6 +247,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       queryStatusByteFn: (int n, int timeoutMs) =>
           queryStatusByte(n, timeoutMs: timeoutMs),
       bytesWritten: bytes.length,
+      supportsRealtimeStatus: _supportsRealtimeStatus,
       tag: _tag,
     );
   }
@@ -303,6 +314,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     } finally {
       _socket?.destroy();
       _socket = null;
+      _supportsRealtimeStatus = null;
       _setState(PrinterConnectionState.disconnected);
     }
   }

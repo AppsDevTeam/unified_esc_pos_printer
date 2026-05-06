@@ -18,6 +18,9 @@ class UsbConnectorImpl extends UsbConnectorBase {
   PrinterConnectionState get state => PrinterConnectionState.disconnected;
 
   @override
+  bool? get supportsRealtimeStatus => null;
+
+  @override
   Stream<List<UsbPrinterDevice>> scan({
     Duration timeout = const Duration(seconds: 5),
   }) {

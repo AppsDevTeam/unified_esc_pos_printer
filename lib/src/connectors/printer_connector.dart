@@ -62,6 +62,19 @@ abstract class PrinterConnector<T extends PrinterDevice> {
   /// Throws [PrinterStateException] if not connected.
   Future<int> queryStatusByte(int n, {int timeoutMs = 2000});
 
+  /// Whether the currently-connected printer responded to a DLE EOT 1 probe
+  /// during [connect]. Many cheap thermal printers don't implement DLE EOT;
+  /// for those we have no way to tell "post-write timeout = error" from
+  /// "post-write timeout = the printer just doesn't speak this protocol",
+  /// and we must treat write success as the source of truth.
+  ///
+  /// Values:
+  /// - `true`: probe got a response — a post-write timeout is a real problem.
+  /// - `false`: probe did not respond — post-write timeouts must be ignored.
+  /// - `null`: probe has not run yet (not connected, transport that cannot
+  ///   read back like BLE/Windows spooler).
+  bool? get supportsRealtimeStatus;
+
   /// Disconnect from the current printer.
   Future<void> disconnect();
 

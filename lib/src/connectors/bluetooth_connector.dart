@@ -39,6 +39,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
   StreamSubscription<Map<String, dynamic>>? _connectionSub;
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
+  bool? _supportsRealtimeStatus;
   final StreamController<PrinterConnectionState> _stateController =
       StreamController<PrinterConnectionState>.broadcast();
 
@@ -47,6 +48,9 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
 
   @override
   PrinterConnectionState get state => _state;
+
+  @override
+  bool? get supportsRealtimeStatus => _supportsRealtimeStatus;
 
   @override
   Stream<List<BluetoothPrinterDevice>> scan({
@@ -232,6 +236,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
         if (event['state'] == 'disconnected' && _state != PrinterConnectionState.disconnected) {
           PrinterLogger.warning(_tag, 'Remote disconnection detected');
           _connectedAddress = null;
+          _supportsRealtimeStatus = null;
           _connectionSub?.cancel();
           _connectionSub = null;
           _setState(PrinterConnectionState.error);
@@ -244,6 +249,12 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
         'Connected to ${device.name} (${device.address})',
       );
       _setState(PrinterConnectionState.connected);
+
+      _supportsRealtimeStatus = await probeRealtimeStatus(
+        queryStatusByteFn: (int n, int timeoutMs) =>
+            queryStatusByte(n, timeoutMs: timeoutMs),
+        tag: _tag,
+      );
     } on TimeoutException catch (e) {
       PrinterLogger.error(
         _tag,
@@ -300,6 +311,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       queryStatusByteFn: (int n, int timeoutMs) =>
           queryStatusByte(n, timeoutMs: timeoutMs),
       bytesWritten: bytes.length,
+      supportsRealtimeStatus: _supportsRealtimeStatus,
       tag: _tag,
     );
   }
@@ -339,6 +351,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     try {
       final String? address = _connectedAddress;
       _connectedAddress = null;
+      _supportsRealtimeStatus = null;
       if (address != null) {
         await _platform.btDisconnect(address: address);
       }

@@ -24,6 +24,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
   SerialPortReader? _reader;
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
+  bool? _supportsRealtimeStatus;
   final StreamController<PrinterConnectionState> _stateController =
       StreamController<PrinterConnectionState>.broadcast();
 
@@ -32,6 +33,9 @@ class UsbConnectorImpl extends UsbConnectorBase {
 
   @override
   PrinterConnectionState get state => _state;
+
+  @override
+  bool? get supportsRealtimeStatus => _supportsRealtimeStatus;
 
   @override
   Stream<List<UsbPrinterDevice>> scan({
@@ -110,6 +114,12 @@ class UsbConnectorImpl extends UsbConnectorBase {
       _port = port;
       PrinterLogger.info(_tag, 'Connected to ${device.identifier}');
       _setState(PrinterConnectionState.connected);
+
+      _supportsRealtimeStatus = await probeRealtimeStatus(
+        queryStatusByteFn: (int n, int timeoutMs) =>
+            queryStatusByte(n, timeoutMs: timeoutMs),
+        tag: _tag,
+      );
     } catch (e) {
       PrinterLogger.error(_tag, 'Connection failed: $e');
       port.dispose();
@@ -142,6 +152,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
       queryStatusByteFn: (int n, int timeoutMs) =>
           queryStatusByte(n, timeoutMs: timeoutMs),
       bytesWritten: bytes.length,
+      supportsRealtimeStatus: _supportsRealtimeStatus,
       tag: _tag,
     );
   }
@@ -198,6 +209,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
       _port?.dispose();
       _reader = null;
       _port = null;
+      _supportsRealtimeStatus = null;
       _setState(PrinterConnectionState.disconnected);
     }
   }

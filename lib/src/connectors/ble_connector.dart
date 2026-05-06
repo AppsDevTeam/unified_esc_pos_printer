@@ -66,6 +66,12 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
   @override
   PrinterConnectionState get state => _state;
 
+  /// BLE without an RX characteristic cannot read back DLE EOT responses
+  /// at all, so the probe is meaningless here — always reports `null`
+  /// ("unknown / no real-time status available").
+  @override
+  bool? get supportsRealtimeStatus => null;
+
   @override
   Stream<List<BlePrinterDevice>> scan({
     Duration timeout = const Duration(seconds: 5),
@@ -315,6 +321,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
       queryStatusByteFn: (int n, int timeoutMs) =>
           queryStatusByte(n, timeoutMs: timeoutMs),
       bytesWritten: bytes.length,
+      supportsRealtimeStatus: supportsRealtimeStatus,
       tag: _tag,
     );
   }
