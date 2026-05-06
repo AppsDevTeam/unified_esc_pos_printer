@@ -157,7 +157,8 @@ class UnifiedEscPosPrinterPlugin : FlutterPlugin, MethodCallHandler, ActivityAwa
             "btQueryStatus" -> {
                 val address = call.argument<String>("address")!!
                 val timeoutMs = call.argument<Int>("timeoutMs") ?: 500
-                bluetoothClassicManager.queryStatus(address, timeoutMs, result)
+                val n = call.argument<Int>("n") ?: 1
+                bluetoothClassicManager.queryStatus(address, n, timeoutMs, result)
             }
             "btDisconnect" -> {
                 val address = call.argument<String>("address")!!

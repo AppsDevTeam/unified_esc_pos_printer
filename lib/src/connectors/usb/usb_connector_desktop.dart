@@ -9,6 +9,7 @@ import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
 import '../../models/printer_status.dart';
 import '../../utils/printer_logger.dart';
+import '../post_write_status.dart';
 import 'usb_connector_interface.dart';
 
 const String _tag = 'USB-Desktop';
@@ -128,7 +129,18 @@ class UsbConnectorImpl extends UsbConnectorBase {
     try {
       PrinterLogger.debug(_tag, 'Writing ${bytes.length} bytes');
       _port!.write(Uint8List.fromList(bytes));
+
+      await verifyAfterWrite(
+        queryStatusByteFn: (int n, int timeoutMs) =>
+            queryStatusByte(n, timeoutMs: timeoutMs),
+        bytesWritten: bytes.length,
+        tag: _tag,
+      );
+
       _setState(PrinterConnectionState.connected);
+    } on PrinterDeviceException {
+      _setState(PrinterConnectionState.connected);
+      rethrow;
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
       _setState(PrinterConnectionState.error);
@@ -139,10 +151,19 @@ class UsbConnectorImpl extends UsbConnectorBase {
 
   @override
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
-    _assertState(PrinterConnectionState.connected, 'queryStatus');
+    final int raw = await queryStatusByte(1, timeoutMs: timeoutMs);
+    final PrinterStatus status =
+        raw >= 0 ? PrinterStatus.fromByte(raw) : PrinterStatus.timeout;
+    PrinterLogger.debug(_tag, 'queryStatus: $status');
+    return status;
+  }
+
+  @override
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) async {
+    _assertState(PrinterConnectionState.connected, 'queryStatusByte');
 
     final SerialPort? port = _port;
-    if (port == null) return PrinterStatus.timeout;
+    if (port == null) return -1;
 
     final SerialPortReader reader = SerialPortReader(port, timeout: timeoutMs);
     final Completer<int> completer = Completer<int>();
@@ -157,8 +178,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
       },
     );
 
-    // Send DLE EOT n=1 (printer status)
-    port.write(Uint8List.fromList(const [0x10, 0x04, 0x01]));
+    port.write(Uint8List.fromList([0x10, 0x04, n & 0xFF]));
 
     final int rawStatus = await Future.any<int>([
       completer.future,
@@ -166,12 +186,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
     ]);
     await sub.cancel();
     reader.close();
-
-    final PrinterStatus status = rawStatus >= 0
-        ? PrinterStatus.fromByte(rawStatus)
-        : PrinterStatus.timeout;
-    PrinterLogger.debug(_tag, 'queryStatus: $status');
-    return status;
+    return rawStatus;
   }
 
   @override

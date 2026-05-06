@@ -48,6 +48,20 @@ abstract class PrinterConnector<T extends PrinterDevice> {
   /// Throws [PrinterStateException] if not connected.
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000});
 
+  /// Send a DLE EOT n=[n] real-time status query and return the raw response
+  /// byte, or `-1` if no response was received within [timeoutMs] (printer
+  /// does not support that query, transport cannot read back, or the
+  /// response was lost).
+  ///
+  /// Used by [PrinterManager.queryStatusDetail] to assemble a full
+  /// [PrinterStatusDetail] from `n=1..4`.
+  ///
+  /// Connectors that cannot read back from the device (e.g. BLE without an
+  /// RX characteristic) must return `-1`.
+  ///
+  /// Throws [PrinterStateException] if not connected.
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000});
+
   /// Disconnect from the current printer.
   Future<void> disconnect();
 

@@ -22,5 +22,6 @@ export 'src/manager/printer_manager.dart';
 export 'src/models/printer_connection_state.dart';
 export 'src/models/printer_device.dart';
 export 'src/models/printer_status.dart';
+export 'src/models/printer_status_detail.dart';
 export 'src/utils/printer_log_level.dart';
 export 'src/utils/text_image_renderer.dart';

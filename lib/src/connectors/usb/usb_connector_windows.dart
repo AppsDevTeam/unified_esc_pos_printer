@@ -113,6 +113,12 @@ class UsbConnectorImpl extends UsbConnectorBase {
   }
 
   @override
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) async {
+    // Windows Print Spooler is one-way — DLE EOT response cannot be read.
+    return -1;
+  }
+
+  @override
   Future<void> disconnect() async {
     if (_state == PrinterConnectionState.disconnected) return;
     _setState(PrinterConnectionState.disconnecting);

@@ -12,6 +12,7 @@ import '../exceptions/printer_exception.dart';
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
 import '../models/printer_status.dart';
+import '../models/printer_status_detail.dart';
 import '../utils/printer_log_level.dart';
 import '../utils/printer_logger.dart';
 
@@ -206,7 +207,7 @@ class PrinterManager {
     }
 
     if (!device.connectionType.isSupportedOnCurrentPlatform) {
-      throw PrinterConnectionException(
+      throw PrinterPlatformUnsupportedException(
         '${device.connectionType.name} is not supported on this platform',
       );
     }
@@ -277,6 +278,28 @@ class PrinterManager {
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
     final PrinterConnector<PrinterDevice> connector = _assertConnected('queryStatus');
     return connector.queryStatus(timeoutMs: timeoutMs);
+  }
+
+  /// Sends DLE EOT n=1, 2, 3, 4 sequentially and returns the assembled
+  /// [PrinterStatusDetail].
+  ///
+  /// Each query has a [timeoutMs] budget independently.  Queries that don't
+  /// respond (or transports that cannot read back, like BLE) leave the
+  /// corresponding fields as `null` in the result.  Use this when you need
+  /// to find out *why* a printer is offline / in error.
+  Future<PrinterStatusDetail> queryStatusDetail({int timeoutMs = 1500}) async {
+    final PrinterConnector<PrinterDevice> connector =
+        _assertConnected('queryStatusDetail');
+    final int eot1 = await connector.queryStatusByte(1, timeoutMs: timeoutMs);
+    final int eot2 = await connector.queryStatusByte(2, timeoutMs: timeoutMs);
+    final int eot3 = await connector.queryStatusByte(3, timeoutMs: timeoutMs);
+    final int eot4 = await connector.queryStatusByte(4, timeoutMs: timeoutMs);
+    return PrinterStatusDetail.fromBytes(
+      eot1: eot1,
+      eot2: eot2,
+      eot3: eot3,
+      eot4: eot4,
+    );
   }
 
   /// Current connection state of the active connector.

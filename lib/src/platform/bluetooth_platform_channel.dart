@@ -182,18 +182,23 @@ class BluetoothPlatformChannel {
     });
   }
 
-  /// Send DLE EOT real-time status query to the printer and wait for a
+  /// Send DLE EOT n=[n] real-time status query to the printer and wait for a
   /// single-byte response.  Returns the status byte, or -1 on timeout.
+  ///
+  /// [n] selects which status the printer reports: 1 — basic, 2 — offline
+  /// cause, 3 — error cause, 4 — paper sensor.
   ///
   /// Because BT SPP is sequential, the printer receives this query only
   /// after all preceding data — so a successful response confirms the
   /// printer has received everything written before this call.
   Future<int> btQueryStatus({
     required String address,
+    int n = 1,
     int timeoutMs = 500,
   }) async {
     return await _method.invokeMethod<int>('btQueryStatus', {
       'address': address,
+      'n': n,
       'timeoutMs': timeoutMs,
     }) ?? -1;
   }

@@ -303,16 +303,17 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
         }
       }
 
-      await postWriteStatusQuery(
-        queryFn: (int timeoutMs) => _platform.bleQueryStatus(
-          deviceId: deviceId,
-          timeoutMs: timeoutMs,
-        ),
+      await verifyAfterWrite(
+        queryStatusByteFn: (int n, int timeoutMs) =>
+            queryStatusByte(n, timeoutMs: timeoutMs),
         bytesWritten: bytes.length,
         tag: _tag,
       );
 
       _setState(PrinterConnectionState.connected);
+    } on PrinterDeviceException {
+      _setState(PrinterConnectionState.connected);
+      rethrow;
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
       _setState(PrinterConnectionState.error);
@@ -334,6 +335,16 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
         : PrinterStatus.timeout;
     PrinterLogger.debug(_tag, 'queryStatus: $status');
     return status;
+  }
+
+  /// BLE without an RX characteristic cannot read back the printer's DLE EOT
+  /// response, so this connector cannot retrieve the raw status byte for any
+  /// `n`. Returns `-1` (unknown) for all values — callers will treat this as
+  /// "no detail available" and fall back to a generic message.
+  @override
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) async {
+    _assertState(PrinterConnectionState.connected, 'queryStatusByte');
+    return -1;
   }
 
   @override

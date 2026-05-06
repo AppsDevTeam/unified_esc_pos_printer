@@ -8,7 +8,7 @@ import 'usb_connector_interface.dart';
 
 /// Stub USB connector for unsupported platforms (web, Fuchsia, etc.).
 ///
-/// All methods throw [PrinterConnectionException].
+/// All methods throw [PrinterPlatformUnsupportedException].
 class UsbConnectorImpl extends UsbConnectorBase {
   @override
   Stream<PrinterConnectionState> get stateStream =>
@@ -21,7 +21,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
   Stream<List<UsbPrinterDevice>> scan({
     Duration timeout = const Duration(seconds: 5),
   }) {
-    return throw const PrinterConnectionException(
+    return throw const PrinterPlatformUnsupportedException(
       'USB printing is not supported on this platform',
     );
   }
@@ -34,14 +34,14 @@ class UsbConnectorImpl extends UsbConnectorBase {
     UsbPrinterDevice device, {
     Duration timeout = const Duration(seconds: 5),
   }) {
-    return throw const PrinterConnectionException(
+    return throw const PrinterPlatformUnsupportedException(
       'USB printing is not supported on this platform',
     );
   }
 
   @override
   Future<void> writeBytes(List<int> bytes) {
-    return throw const PrinterConnectionException(
+    return throw const PrinterPlatformUnsupportedException(
       'USB printing is not supported on this platform',
     );
   }
@@ -50,6 +50,9 @@ class UsbConnectorImpl extends UsbConnectorBase {
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
     return PrinterStatus.unsupported;
   }
+
+  @override
+  Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) async => -1;
 
   @override
   Future<void> disconnect() async {}
