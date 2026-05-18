@@ -155,6 +155,15 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         scanTimer?.invalidate()
         scanTimer = nil
         centralManager?.stopScan()
+        // Signal Flutter that no more scan events are coming. Closes the
+        // Dart-side broadcast stream gracefully so a subsequent
+        // subscription.cancel() becomes a no-op instead of producing
+        // "No active stream to cancel" noise in services-library logs
+        // (and Crashlytics).
+        DispatchQueue.main.async {
+            self.scanEventSink?(FlutterEndOfEventStream)
+            self.scanEventSink = nil
+        }
     }
 
     func connect(deviceId: String, timeoutMs: Int, serviceUuid: String?, characteristicUuid: String?, result: @escaping FlutterResult) {

@@ -170,6 +170,16 @@ class BluetoothClassicManager(private val context: Context) {
         try {
             bluetoothAdapter?.cancelDiscovery()
         } catch (_: SecurityException) {}
+
+        // Signal Flutter that no more discovery events are coming. Closes
+        // the Dart-side broadcast stream gracefully so a subsequent
+        // subscription.cancel() becomes a no-op instead of producing
+        // "No active stream to cancel" noise in services-library logs
+        // (and Crashlytics).
+        mainHandler.post {
+            scanEventSink?.endOfStream()
+            scanEventSink = null
+        }
     }
 
     fun connect(address: String, timeoutMs: Long, result: MethodChannel.Result) {
