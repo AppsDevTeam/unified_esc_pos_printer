@@ -1,3 +1,7 @@
+## 3.7.1
+
+- Signal `endOfStream` after BLE / Bluetooth Classic scan stops (Android + iOS) — closes the Dart-side broadcast controller so a subsequent `subscription.cancel()` becomes a no-op instead of producing "No active stream to cancel" noise in `FlutterError.reportError` (and Crashlytics).
+
 ## 3.7.0
 
 - Add typed exception subclasses for common failure modes:
