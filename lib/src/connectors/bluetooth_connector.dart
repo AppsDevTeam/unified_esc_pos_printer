@@ -10,7 +10,9 @@ import '../models/printer_device.dart';
 
 import '../platform/bluetooth_platform_channel.dart';
 import '../models/printer_status.dart';
+import '../models/printer_status_detail.dart';
 import '../utils/printer_logger.dart';
+import 'asb_monitor.dart';
 import 'post_write_status.dart';
 import 'printer_connector.dart';
 
@@ -37,6 +39,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
   final BluetoothPlatformChannel _platform = BluetoothPlatformChannel.instance;
   String? _connectedAddress;
   StreamSubscription<Map<String, dynamic>>? _connectionSub;
+  AsbMonitor? _asb;
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
   bool? _supportsRealtimeStatus;
@@ -53,6 +56,17 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
   bool? get supportsRealtimeStatus => _supportsRealtimeStatus;
 
   @override
+  bool get supportsAsb => _asb?.isEnabled ?? false;
+
+  @override
+  PrinterStatusDetail get latestAsbStatus =>
+      _asb?.latest ?? const PrinterStatusDetail();
+
+  @override
+  Stream<PrinterStatusDetail> get asbStatusStream =>
+      _asb?.statusStream ?? const Stream<PrinterStatusDetail>.empty();
+
+  @override
   Stream<List<BluetoothPrinterDevice>> scan({
     Duration timeout = const Duration(seconds: 5),
   }) async* {
@@ -60,7 +74,8 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     PrinterLogger.info(_tag, 'Starting scan (timeout: ${timeout.inSeconds}s)');
 
     if (!Platform.isAndroid && !Platform.isWindows) {
-      PrinterLogger.error(_tag, 'Unsupported platform: ${Platform.operatingSystem}');
+      PrinterLogger.error(
+          _tag, 'Unsupported platform: ${Platform.operatingSystem}');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw const PrinterPlatformUnsupportedException(
@@ -83,7 +98,8 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
 
     // Emit bonded (paired) devices immediately.
     try {
-      final List<Map<String, dynamic>> bonded = await _platform.getBondedDevices();
+      final List<Map<String, dynamic>> bonded =
+          await _platform.getBondedDevices();
 
       for (final Map<String, dynamic> d in bonded) {
         found.add(BluetoothPrinterDevice(
@@ -195,7 +211,8 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     _setState(PrinterConnectionState.connecting);
 
     if (!Platform.isAndroid && !Platform.isWindows) {
-      PrinterLogger.error(_tag, 'Unsupported platform: ${Platform.operatingSystem}');
+      PrinterLogger.error(
+          _tag, 'Unsupported platform: ${Platform.operatingSystem}');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw const PrinterPlatformUnsupportedException(
@@ -231,9 +248,11 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
 
       // Monitor for remote disconnection.
       _connectionSub = _platform.connectionStateStream
-          .where((event) => event['type'] == 'bt' && event['deviceId'] == device.address)
+          .where((event) =>
+              event['type'] == 'bt' && event['deviceId'] == device.address)
           .listen((event) {
-        if (event['state'] == 'disconnected' && _state != PrinterConnectionState.disconnected) {
+        if (event['state'] == 'disconnected' &&
+            _state != PrinterConnectionState.disconnected) {
           PrinterLogger.warning(_tag, 'Remote disconnection detected');
           _connectedAddress = null;
           _supportsRealtimeStatus = null;
@@ -250,11 +269,40 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       );
       _setState(PrinterConnectionState.connected);
 
-      _supportsRealtimeStatus = await probeRealtimeStatus(
-        queryStatusByteFn: (int n, int timeoutMs) =>
-            queryStatusByte(n, timeoutMs: timeoutMs),
-        tag: _tag,
+      // Prefer ASB over DLE EOT polling — see NetworkConnector for the
+      // rationale. Falls back to the original probe if the printer
+      // doesn't push the initial 4-byte status packet within the
+      // timeout.
+      final String address = device.address;
+      final Stream<List<int>> inboundBytes = _platform.incomingBytesStream
+          .where((Map<String, dynamic> event) =>
+              event['type'] == 'bt' && event['deviceId'] == address)
+          .map((Map<String, dynamic> event) {
+        final Object? raw = event['bytes'];
+        if (raw is Uint8List) return raw;
+        if (raw is List<int>) return raw;
+        return const <int>[];
+      });
+
+      final AsbMonitor monitor = AsbMonitor(tag: _tag);
+      _asb = monitor;
+      final bool asbOk = await monitor.tryEnable(
+        inboundStream: inboundBytes,
+        sendBytes: (List<int> b) => _platform.btWrite(
+          address: address,
+          data: Uint8List.fromList(b),
+        ),
       );
+
+      if (!asbOk) {
+        await monitor.dispose();
+        _asb = null;
+        _supportsRealtimeStatus = await probeRealtimeStatus(
+          queryStatusByteFn: (int n, int timeoutMs) =>
+              queryStatusByte(n, timeoutMs: timeoutMs),
+          tag: _tag,
+        );
+      }
     } on TimeoutException catch (e) {
       PrinterLogger.error(
         _tag,
@@ -280,6 +328,19 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
   @override
   Future<void> writeBytes(List<int> bytes) async {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
+
+    final AsbMonitor? asb = _asb;
+    if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
+      PrinterLogger.error(
+        _tag,
+        'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
+      );
+      throw PrinterDeviceException(
+        'Printer reports an error condition',
+        detail: asb.latest,
+      );
+    }
+
     _setState(PrinterConnectionState.printing);
 
     final String address = _connectedAddress ?? '';
@@ -305,6 +366,20 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('Bluetooth write failed', cause: e);
+    }
+
+    if (asb != null && asb.isEnabled) {
+      if (asb.latest.hasAnyProblem) {
+        PrinterLogger.error(
+          _tag,
+          'Post-write: ASB reports problem: ${asb.latest}',
+        );
+        throw PrinterDeviceException(
+          'Printer reports an error condition',
+          detail: asb.latest,
+        );
+      }
+      return;
     }
 
     await verifyAfterWrite(
@@ -357,6 +432,9 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
 
     await _connectionSub?.cancel();
     _connectionSub = null;
+
+    await _asb?.dispose();
+    _asb = null;
 
     try {
       final String? address = _connectedAddress;

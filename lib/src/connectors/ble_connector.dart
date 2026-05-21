@@ -8,7 +8,9 @@ import '../models/printer_device.dart';
 
 import '../platform/bluetooth_platform_channel.dart';
 import '../models/printer_status.dart';
+import '../models/printer_status_detail.dart';
 import '../utils/printer_logger.dart';
+import 'asb_monitor.dart';
 import 'post_write_status.dart';
 import 'printer_connector.dart';
 
@@ -55,6 +57,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
   bool _writeWithoutResponse = false;
   String? _connectedDeviceId;
   StreamSubscription<Map<String, dynamic>>? _connectionSub;
+  AsbMonitor? _asb;
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
   final StreamController<PrinterConnectionState> _stateController =
@@ -71,6 +74,17 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
   /// ("unknown / no real-time status available").
   @override
   bool? get supportsRealtimeStatus => null;
+
+  @override
+  bool get supportsAsb => _asb?.isEnabled ?? false;
+
+  @override
+  PrinterStatusDetail get latestAsbStatus =>
+      _asb?.latest ?? const PrinterStatusDetail();
+
+  @override
+  Stream<PrinterStatusDetail> get asbStatusStream =>
+      _asb?.statusStream ?? const Stream<PrinterStatusDetail>.empty();
 
   @override
   Stream<List<BlePrinterDevice>> scan({
@@ -196,7 +210,8 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     Duration timeout = const Duration(seconds: 10),
   }) async {
     _assertState(PrinterConnectionState.disconnected, 'connect');
-    PrinterLogger.info(_tag, 'Connecting to ${device.name} (${device.deviceId})');
+    PrinterLogger.info(
+        _tag, 'Connecting to ${device.name} (${device.deviceId})');
     _setState(PrinterConnectionState.connecting);
 
     // Request permissions
@@ -254,8 +269,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     // Monitor for remote disconnection
     _connectionSub = _platform.connectionStateStream
         .where((event) =>
-            event['type'] == 'ble' &&
-            event['deviceId'] == device.deviceId)
+            event['type'] == 'ble' && event['deviceId'] == device.deviceId)
         .listen((event) {
       if (event['state'] == 'disconnected' &&
           _state != PrinterConnectionState.disconnected) {
@@ -271,11 +285,55 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
       'Connected to ${device.name} (MTU: $_mtuPayload)',
     );
     _setState(PrinterConnectionState.connected);
+
+    // Try Automatic Status Back — if the printer has a notify
+    // characteristic and the platform forwards the initial 4-byte ASB
+    // packet within the timeout, ASB takes over status detection.
+    // Otherwise the connector falls through to its existing "no
+    // readback" behavior.
+    final String deviceId = device.deviceId;
+    final Stream<List<int>> inboundBytes = _platform.incomingBytesStream
+        .where((Map<String, dynamic> event) =>
+            event['type'] == 'ble' && event['deviceId'] == deviceId)
+        .map((Map<String, dynamic> event) {
+      final Object? raw = event['bytes'];
+      if (raw is Uint8List) return raw;
+      if (raw is List<int>) return raw;
+      return const <int>[];
+    });
+
+    final AsbMonitor monitor = AsbMonitor(tag: _tag);
+    _asb = monitor;
+    final bool asbOk = await monitor.tryEnable(
+      inboundStream: inboundBytes,
+      sendBytes: (List<int> b) => _platform.bleWrite(
+        deviceId: deviceId,
+        data: Uint8List.fromList(b),
+        withoutResponse: _writeWithoutResponse,
+      ),
+    );
+
+    if (!asbOk) {
+      await monitor.dispose();
+      _asb = null;
+    }
   }
 
   @override
   Future<void> writeBytes(List<int> bytes) async {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
+
+    final AsbMonitor? asb = _asb;
+    if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
+      PrinterLogger.error(
+        _tag,
+        'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
+      );
+      throw PrinterDeviceException(
+        'Printer reports an error condition',
+        detail: asb.latest,
+      );
+    }
 
     final String deviceId = _connectedDeviceId ?? '';
 
@@ -315,6 +373,20 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('BLE write failed', cause: e);
+    }
+
+    if (asb != null && asb.isEnabled) {
+      if (asb.latest.hasAnyProblem) {
+        PrinterLogger.error(
+          _tag,
+          'Post-write: ASB reports problem: ${asb.latest}',
+        );
+        throw PrinterDeviceException(
+          'Printer reports an error condition',
+          detail: asb.latest,
+        );
+      }
+      return;
     }
 
     await verifyAfterWrite(
@@ -360,6 +432,9 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
 
     await _connectionSub?.cancel();
     _connectionSub = null;
+
+    await _asb?.dispose();
+    _asb = null;
 
     try {
       final String? deviceId = _connectedDeviceId;

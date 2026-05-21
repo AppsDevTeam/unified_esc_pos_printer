@@ -8,7 +8,9 @@ import '../../exceptions/printer_exception.dart';
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
 import '../../models/printer_status.dart';
+import '../../models/printer_status_detail.dart';
 import '../../utils/printer_logger.dart';
+import '../asb_monitor.dart';
 import '../post_write_status.dart';
 import 'usb_connector_interface.dart';
 
@@ -28,6 +30,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
   bool? _supportsRealtimeStatus;
+  AsbMonitor? _asb;
   final StreamController<PrinterConnectionState> _stateController =
       StreamController<PrinterConnectionState>.broadcast();
 
@@ -39,6 +42,17 @@ class UsbConnectorImpl extends UsbConnectorBase {
 
   @override
   bool? get supportsRealtimeStatus => _supportsRealtimeStatus;
+
+  @override
+  bool get supportsAsb => _asb?.isEnabled ?? false;
+
+  @override
+  PrinterStatusDetail get latestAsbStatus =>
+      _asb?.latest ?? const PrinterStatusDetail();
+
+  @override
+  Stream<PrinterStatusDetail> get asbStatusStream =>
+      _asb?.statusStream ?? const Stream<PrinterStatusDetail>.empty();
 
   @override
   Stream<List<UsbPrinterDevice>> scan({
@@ -114,14 +128,16 @@ class UsbConnectorImpl extends UsbConnectorBase {
       bool opened = false;
       for (final String type in typesToTry) {
         try {
-          PrinterLogger.debug(_tag, 'Trying serial type: "${type.isEmpty ? "auto" : type}"');
+          PrinterLogger.debug(
+              _tag, 'Trying serial type: "${type.isEmpty ? "auto" : type}"');
           final UsbPort? candidate = await found.create(type);
           if (candidate == null) continue;
           final bool didOpen = await candidate.open();
           if (didOpen) {
             port = candidate;
             opened = true;
-            PrinterLogger.debug(_tag, 'Serial type "${type.isEmpty ? "auto" : type}" worked');
+            PrinterLogger.debug(
+                _tag, 'Serial type "${type.isEmpty ? "auto" : type}" worked');
             break;
           }
           // open() failed — close and try next
@@ -135,7 +151,8 @@ class UsbConnectorImpl extends UsbConnectorBase {
       if (!opened) {
         PrinterLogger.debug(_tag, 'Serial types failed, trying raw USB');
         port = await UsbSerial.createRawFromDeviceId(found.deviceId);
-        if (port == null) throw Exception('Could not create UsbPort – device not recognized');
+        if (port == null)
+          throw Exception('Could not create UsbPort – device not recognized');
         opened = await port.open();
         PrinterLogger.debug(_tag, 'Raw USB open: $opened');
         if (!opened) throw Exception('UsbPort.open() returned false');
@@ -156,16 +173,36 @@ class UsbConnectorImpl extends UsbConnectorBase {
       // Send ESC @ to initialise the printer.
       await openPort.write(Uint8List.fromList(cInit.codeUnits));
 
-      _port = port;
-      _inboundStream = port.inputStream?.asBroadcastStream();
+      _port = openPort;
+      _inboundStream = openPort.inputStream?.asBroadcastStream();
       PrinterLogger.info(_tag, 'Connected to ${device.identifier}');
       _setState(PrinterConnectionState.connected);
 
-      _supportsRealtimeStatus = await probeRealtimeStatus(
-        queryStatusByteFn: (int n, int timeoutMs) =>
-            queryStatusByte(n, timeoutMs: timeoutMs),
-        tag: _tag,
-      );
+      // Prefer ASB over DLE EOT polling — see NetworkConnector for the
+      // rationale. Falls back to the original probe if the printer
+      // doesn't push the initial 4-byte status packet within the timeout.
+      final Stream<Uint8List>? inbound = _inboundStream;
+      if (inbound != null) {
+        final AsbMonitor monitor = AsbMonitor(tag: _tag);
+        _asb = monitor;
+        final bool asbOk = await monitor.tryEnable(
+          inboundStream: inbound.cast<List<int>>(),
+          sendBytes: (List<int> b) => openPort.write(Uint8List.fromList(b)),
+        );
+
+        if (!asbOk) {
+          await monitor.dispose();
+          _asb = null;
+        }
+      }
+
+      if (_asb == null) {
+        _supportsRealtimeStatus = await probeRealtimeStatus(
+          queryStatusByteFn: (int n, int timeoutMs) =>
+              queryStatusByte(n, timeoutMs: timeoutMs),
+          tag: _tag,
+        );
+      }
     } on PlatformException catch (e) {
       final UsbException usbError = UsbException.fromPlatformException(e);
       PrinterLogger.error(_tag, 'USB error: $usbError');
@@ -188,6 +225,19 @@ class UsbConnectorImpl extends UsbConnectorBase {
   @override
   Future<void> writeBytes(List<int> bytes) async {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
+
+    final AsbMonitor? asb = _asb;
+    if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
+      PrinterLogger.error(
+        _tag,
+        'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
+      );
+      throw PrinterDeviceException(
+        'Printer reports an error condition',
+        detail: asb.latest,
+      );
+    }
+
     _setState(PrinterConnectionState.printing);
     try {
       PrinterLogger.debug(_tag, 'Writing ${bytes.length} bytes');
@@ -205,6 +255,20 @@ class UsbConnectorImpl extends UsbConnectorBase {
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('USB write failed', cause: e);
+    }
+
+    if (asb != null && asb.isEnabled) {
+      if (asb.latest.hasAnyProblem) {
+        PrinterLogger.error(
+          _tag,
+          'Post-write: ASB reports problem: ${asb.latest}',
+        );
+        throw PrinterDeviceException(
+          'Printer reports an error condition',
+          detail: asb.latest,
+        );
+      }
+      return;
     }
 
     await verifyAfterWrite(
@@ -260,6 +324,10 @@ class UsbConnectorImpl extends UsbConnectorBase {
     if (_state == PrinterConnectionState.disconnected) return;
     PrinterLogger.info(_tag, 'Disconnecting');
     _setState(PrinterConnectionState.disconnecting);
+
+    await _asb?.dispose();
+    _asb = null;
+
     try {
       await _port?.close();
     } finally {

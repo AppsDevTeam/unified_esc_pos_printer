@@ -7,7 +7,9 @@ import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
 
 import '../models/printer_status.dart';
+import '../models/printer_status_detail.dart';
 import '../utils/printer_logger.dart';
+import 'asb_monitor.dart';
 import 'post_write_status.dart';
 import 'printer_connector.dart';
 
@@ -35,6 +37,12 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
   Stream<List<int>>? _inboundStream;
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
   bool? _supportsRealtimeStatus;
+  AsbMonitor? _asb;
+  // Set to true by [disconnect] before tearing the socket down so the
+  // [socket.done] handler can tell a local teardown from a remote close
+  // (idle timeout on the printer side, network glitch, …). Cleared on
+  // every fresh [connect].
+  bool _disconnectInitiatedLocally = false;
   final StreamController<PrinterConnectionState> _stateController =
       StreamController<PrinterConnectionState>.broadcast();
 
@@ -46,6 +54,17 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
 
   @override
   bool? get supportsRealtimeStatus => _supportsRealtimeStatus;
+
+  @override
+  bool get supportsAsb => _asb?.isEnabled ?? false;
+
+  @override
+  PrinterStatusDetail get latestAsbStatus =>
+      _asb?.latest ?? const PrinterStatusDetail();
+
+  @override
+  Stream<PrinterStatusDetail> get asbStatusStream =>
+      _asb?.statusStream ?? const Stream<PrinterStatusDetail>.empty();
 
   @override
   Stream<List<NetworkPrinterDevice>> scan({
@@ -180,26 +199,56 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     PrinterLogger.info(_tag, 'Connecting to ${device.host}:${device.port}');
     _setState(PrinterConnectionState.connecting);
 
+    _disconnectInitiatedLocally = false;
+
     try {
-      _socket = await Socket.connect(
+      final Socket socket = await Socket.connect(
         device.host,
         device.port,
         timeout: timeout,
       );
-      _inboundStream = _socket!.asBroadcastStream();
+      final Stream<List<int>> inbound = socket.asBroadcastStream();
+      _socket = socket;
+      _inboundStream = inbound;
+
+      // Watch for remote close — printer-side idle timeout, network glitch,
+      // FIN/RST from the router. PrintManager._ensureConnected will see
+      // state != connected on the next print and dial up fresh.
+      // ignore: discarded_futures
+      socket.done
+          .then((_) => _onSocketDone(local: _disconnectInitiatedLocally));
 
       // Send ESC @ to initialise the printer on connect.
-      _socket!.add(cInit.codeUnits);
-      await _socket!.flush();
+      socket.add(cInit.codeUnits);
+      await socket.flush();
 
       PrinterLogger.info(_tag, 'Connected to ${device.host}:${device.port}');
       _setState(PrinterConnectionState.connected);
 
-      _supportsRealtimeStatus = await probeRealtimeStatus(
-        queryStatusByteFn: (int n, int timeoutMs) =>
-            queryStatusByte(n, timeoutMs: timeoutMs),
-        tag: _tag,
+      // Prefer ASB over DLE EOT polling — ASB tells us about paper-out
+      // / cover-open even when the printer otherwise stops answering
+      // status queries (a common failure mode of cheap thermal heads).
+      // Falls back to the original probe only if the printer doesn't
+      // push the initial 4-byte status packet within the timeout.
+      final AsbMonitor monitor = AsbMonitor(tag: _tag);
+      _asb = monitor;
+      final bool asbOk = await monitor.tryEnable(
+        inboundStream: inbound,
+        sendBytes: (List<int> b) async {
+          socket.add(b);
+          await socket.flush();
+        },
       );
+
+      if (!asbOk) {
+        await monitor.dispose();
+        _asb = null;
+        _supportsRealtimeStatus = await probeRealtimeStatus(
+          queryStatusByteFn: (int n, int timeoutMs) =>
+              queryStatusByte(n, timeoutMs: timeoutMs),
+          tag: _tag,
+        );
+      }
     } on SocketException catch (e) {
       PrinterLogger.error(
         _tag,
@@ -229,6 +278,22 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
   Future<void> writeBytes(List<int> bytes) async {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
 
+    // Gate the print on the most recent ASB status — refusing to send
+    // bytes to a printer that has already reported a fault is cheaper
+    // than transferring 20 KB of raster into a printer that can't use
+    // them and then trying to recover.
+    final AsbMonitor? asb = _asb;
+    if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
+      PrinterLogger.error(
+        _tag,
+        'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
+      );
+      throw PrinterDeviceException(
+        'Printer reports an error condition',
+        detail: asb.latest,
+      );
+    }
+
     _setState(PrinterConnectionState.printing);
 
     try {
@@ -244,6 +309,24 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('Failed to write bytes to printer', cause: e);
+    }
+
+    if (asb != null && asb.isEnabled) {
+      // ASB pushes any post-write status change asynchronously — no need
+      // to poll DLE EOT here. Re-check the cached status one more time
+      // in case a new packet arrived between the gate above and the
+      // socket flush completing.
+      if (asb.latest.hasAnyProblem) {
+        PrinterLogger.error(
+          _tag,
+          'Post-write: ASB reports problem: ${asb.latest}',
+        );
+        throw PrinterDeviceException(
+          'Printer reports an error condition',
+          detail: asb.latest,
+        );
+      }
+      return;
     }
 
     // Outside the write try/catch: a PrinterDeviceException raised here
@@ -313,7 +396,11 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     if (_state == PrinterConnectionState.disconnected) return;
 
     PrinterLogger.info(_tag, 'Disconnecting');
+    _disconnectInitiatedLocally = true;
     _setState(PrinterConnectionState.disconnecting);
+
+    await _asb?.dispose();
+    _asb = null;
 
     try {
       await _socket?.flush();
@@ -325,6 +412,32 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       _supportsRealtimeStatus = null;
       _setState(PrinterConnectionState.disconnected);
     }
+  }
+
+  /// Invoked from [Socket.done] when the OS socket closes. [local] is true
+  /// when our own [disconnect] initiated the teardown — in that case the
+  /// future just completes after `_socket.close()` and there's nothing
+  /// left to do. When false, the printer (or the network) closed the
+  /// connection unilaterally and we need to tear our state down so the
+  /// next print triggers a fresh [PrinterManager._ensureConnected].
+  Future<void> _onSocketDone({required bool local}) async {
+    if (local) {
+      PrinterLogger.debug(_tag, 'Socket done (local close)');
+      return;
+    }
+    if (_state == PrinterConnectionState.disconnected) {
+      // We may have raced disconnect() — nothing else to do.
+      return;
+    }
+    PrinterLogger.warning(_tag, 'Socket closed by remote');
+    await _asb?.dispose();
+    _asb = null;
+    _socket?.destroy();
+    _socket = null;
+    _inboundStream = null;
+    _supportsRealtimeStatus = null;
+    _setState(PrinterConnectionState.error);
+    _setState(PrinterConnectionState.disconnected);
   }
 
   @override

@@ -50,6 +50,7 @@ class BluetoothClassicManager(private val context: Context) {
 
 
     var connectionStateCallback: ((String, String) -> Unit)? = null
+    var incomingBytesCallback: ((String, ByteArray) -> Unit)? = null
 
     val scanStreamHandler = object : EventChannel.StreamHandler {
         override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -244,11 +245,22 @@ class BluetoothClassicManager(private val context: Context) {
                                 continue
                             }
                             val inputStream = sock.inputStream
-                            if (inputStream.available() > 0) {
-                                val buf = ByteArray(inputStream.available())
-                                inputStream.read(buf)
+                            val available = inputStream.available()
+                            if (available > 0) {
+                                val buf = ByteArray(available)
+                                val read = inputStream.read(buf)
+                                if (read > 0) {
+                                    // Forward to ASB listener on the Flutter side.
+                                    // Slice to actual read count and dispatch on
+                                    // the main thread; EventSink is not thread-safe.
+                                    val payload = if (read == buf.size) buf else buf.copyOf(read)
+                                    val cb = incomingBytesCallback
+                                    if (cb != null) {
+                                        mainHandler.post { cb(address, payload) }
+                                    }
+                                }
                             }
-                            Thread.sleep(500)
+                            Thread.sleep(50)
                         }
                     } catch (_: IOException) {
                         // Connection lost — socket closed or remote disconnect
