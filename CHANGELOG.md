@@ -1,3 +1,7 @@
+## 3.8.1
+
+- **NetworkConnector scan now covers all reachable /24 subnets**, not just the first non-loopback interface returned by `NetworkInterface.list()`. Multi-homed Android devices (Sunmi D3 Pro with USB tether + Wi-Fi, phones with VPN + Wi-Fi, …) often list secondary interfaces before the Wi-Fi one — picking just the first meant scanning the wrong subnet and missing printers reachable via Wi-Fi. Probes across all subnets run concurrently, so scan duration stays bounded by the per-probe timeout.
+
 ## 3.8.0
 
 - **Comprehensive printer status detection.** `verifyBeforeWrite` and `verifyAfterWrite` now always query the full DLE EOT family (n=1, 2, 3, 4) on every status check, not just n=1. Some firmwares (Sunmi NT212 confirmed) leave the EOT 1 error bit clear even when paper is out or the cover is open, signalling the fault only in EOT 4 (paper sensor); asking all four every time is the only protocol-portable way to catch every state.
