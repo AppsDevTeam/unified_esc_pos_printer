@@ -20,7 +20,7 @@ dependencies:
   usb_serial:
     git:
       url: https://github.com/AppsDevTeam/usbserial.git
-      ref: v0.7.0
+      ref: v0.8.0
 
   # USB — Windows / Linux / macOS serial port (wraps libserialport)
   # AppsDevTeam fork with 16 KB page-size aligned Android .so (Android 16 requirement)

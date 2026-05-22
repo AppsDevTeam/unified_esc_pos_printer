@@ -112,7 +112,18 @@ class UsbConnectorImpl extends UsbConnectorBase {
       );
     }
 
+    PrinterLogger.info(
+      _tag,
+      'USB device: vid=0x${found.vid?.toRadixString(16).padLeft(4, '0')}, '
+      'pid=0x${found.pid?.toRadixString(16).padLeft(4, '0')}, '
+      'manufacturer="${found.manufacturerName ?? '?'}", '
+      'product="${found.productName ?? '?'}", '
+      'deviceId=${found.deviceId}',
+    );
+
     UsbPort? port;
+    String selectedType = '';
+    bool selectedRaw = false;
     try {
       // Try auto-detect first, then fall back to known serial chip types.
       // ESC/POS printers often aren't recognized by auto-detect.
@@ -127,35 +138,43 @@ class UsbConnectorImpl extends UsbConnectorBase {
       ];
       bool opened = false;
       for (final String type in typesToTry) {
+        final String label = type.isEmpty ? 'auto' : type;
         try {
-          PrinterLogger.debug(
-              _tag, 'Trying serial type: "${type.isEmpty ? "auto" : type}"');
+          PrinterLogger.debug(_tag, 'Trying serial type: "$label"');
           final UsbPort? candidate = await found.create(type);
-          if (candidate == null) continue;
+          if (candidate == null) {
+            PrinterLogger.debug(_tag, '  → create("$label") returned null');
+            continue;
+          }
           final bool didOpen = await candidate.open();
           if (didOpen) {
             port = candidate;
             opened = true;
-            PrinterLogger.debug(
-                _tag, 'Serial type "${type.isEmpty ? "auto" : type}" worked');
+            selectedType = label;
+            PrinterLogger.info(_tag, 'Serial type "$label" worked');
             break;
           }
           // open() failed — close and try next
+          PrinterLogger.debug(_tag, '  → "$label" open() returned false');
           await candidate.close();
-        } catch (_) {
-          // Try next type
+        } catch (e) {
+          PrinterLogger.debug(_tag, '  → "$label" threw: $e');
         }
       }
 
       // If no serial type worked, try raw bulk USB transfer (for direct USB printers).
       if (!opened) {
-        PrinterLogger.debug(_tag, 'Serial types failed, trying raw USB');
+        PrinterLogger.info(
+            _tag, 'Serial types failed, falling back to raw USB');
         port = await UsbSerial.createRawFromDeviceId(found.deviceId);
-        if (port == null)
+        if (port == null) {
           throw Exception('Could not create UsbPort – device not recognized');
+        }
         opened = await port.open();
-        PrinterLogger.debug(_tag, 'Raw USB open: $opened');
+        PrinterLogger.info(_tag, 'Raw USB open: $opened');
         if (!opened) throw Exception('UsbPort.open() returned false');
+        selectedType = 'raw';
+        selectedRaw = true;
       }
 
       final UsbPort openPort = port ?? (throw Exception('port is null'));
@@ -175,7 +194,12 @@ class UsbConnectorImpl extends UsbConnectorBase {
 
       _port = openPort;
       _inboundStream = openPort.inputStream?.asBroadcastStream();
-      PrinterLogger.info(_tag, 'Connected to ${device.identifier}');
+      PrinterLogger.info(
+        _tag,
+        'Connected to ${device.identifier} '
+        '(serialType=$selectedType, raw=$selectedRaw, '
+        'inputStream=${openPort.inputStream == null ? "null (READS DISABLED)" : "available"})',
+      );
       _setState(PrinterConnectionState.connected);
 
       // Prefer ASB over DLE EOT polling — see NetworkConnector for the
