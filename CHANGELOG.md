@@ -1,3 +1,7 @@
+## 3.8.2
+
+- **`PrinterDisconnectedDuringOperationException` for silent printers.** When `verifyBeforeWrite` / `verifyAfterWrite` time out on DLE EOT 1 (after retry) from a printer that previously responded — power cut, network drop, frozen firmware — the helpers now throw `PrinterDisconnectedDuringOperationException` instead of `PrinterDeviceException` with an empty status detail. Callers that map exceptions to user messages can show "printer disconnected / check it's powered on" semantics for this case rather than the "hardware fault" copy a `PrinterDeviceException` implies.
+
 ## 3.8.1
 
 - **NetworkConnector scan now covers all reachable /24 subnets**, not just the first non-loopback interface returned by `NetworkInterface.list()`. Multi-homed Android devices (Sunmi D3 Pro with USB tether + Wi-Fi, phones with VPN + Wi-Fi, …) often list secondary interfaces before the Wi-Fi one — picking just the first meant scanning the wrong subnet and missing printers reachable via Wi-Fi. Probes across all subnets run concurrently, so scan duration stays bounded by the per-probe timeout.

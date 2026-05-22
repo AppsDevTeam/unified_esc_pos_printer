@@ -66,13 +66,19 @@ Future<bool?> verifyBeforeWrite({
 
   if (eot1 < 0) {
     if (supportsRealtimeStatus == true) {
+      // The printer answered status queries earlier in the session and
+      // now goes completely silent — far more likely to be a lost
+      // connection (powered off, network drop, frozen firmware) than a
+      // device-level fault that DLE EOT 2/3/4 would expose. Surface
+      // this as a connection-class exception so callers can show
+      // "check that the printer is on and reachable" instead of the
+      // "check paper / cover" implied by a hardware fault.
       PrinterLogger.error(
         tag,
         'Pre-write: printer stopped responding (previously confirmed support)',
       );
-      throw const PrinterDeviceException(
+      throw const PrinterDisconnectedDuringOperationException(
         'Printer stopped responding to status queries',
-        detail: PrinterStatusDetail(),
       );
     }
     PrinterLogger.debug(

@@ -67,14 +67,17 @@ Future<void> verifyAfterWrite({
 
   if (eot1 < 0) {
     if (supportsRealtimeStatus == true) {
+      // Same reasoning as the pre-write helper — a printer that
+      // previously answered and now goes silent is almost always
+      // a lost connection, not a device fault DLE EOT 2/3/4 could
+      // explain. Surface as a connection-class exception.
       PrinterLogger.error(
         tag,
         'Post-write: status query timed out from a printer that '
-        'normally responds (retry exhausted) — printer is likely in error state',
+        'normally responds (retry exhausted) — printer is likely disconnected',
       );
-      throw const PrinterDeviceException(
+      throw const PrinterDisconnectedDuringOperationException(
         'Printer stopped responding to status queries',
-        detail: PrinterStatusDetail(),
       );
     }
     PrinterLogger.debug(
