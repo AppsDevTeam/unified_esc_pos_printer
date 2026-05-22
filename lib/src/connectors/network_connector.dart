@@ -74,8 +74,14 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     _setState(PrinterConnectionState.scanning);
 
     final List<NetworkPrinterDevice> found = [];
-    String? localIp;
 
+    // Collect every unique /24 the device is on. Multi-homed setups
+    // (Wi-Fi + USB tether, Wi-Fi + cellular hotspot, …) routinely have
+    // two or more non-loopback interfaces; picking only the first
+    // means we'd scan the wrong subnet on devices where the printer
+    // lives on the secondary one (Sunmi D3 Pro reliably reports
+    // `usb0` 192.168.139.x before `wlan0` 192.168.0.x, for example).
+    final Set<String> subnets = <String>{};
     try {
       final List<NetworkInterface> interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
@@ -86,21 +92,23 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
           final String ip = addr.address;
           // Skip loopback and link-local addresses.
           if (ip.startsWith('127.') || ip.startsWith('169.254.')) continue;
-          localIp = ip;
-          PrinterLogger.debug(
-            _tag,
-            'Found local IP: $ip on ${interface.name}',
-          );
-          break;
+          final List<String> parts = ip.split('.');
+          if (parts.length != 4) continue;
+          final String subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
+          if (subnets.add(subnet)) {
+            PrinterLogger.debug(
+              _tag,
+              'Local IP $ip on ${interface.name} → subnet $subnet.*',
+            );
+          }
         }
-        if (localIp != null) break;
       }
     } catch (e) {
       PrinterLogger.error(_tag, 'Failed to enumerate network interfaces: $e');
     }
 
-    if (localIp == null || localIp.isEmpty) {
-      PrinterLogger.error(_tag, 'No usable local IP found — aborting scan');
+    if (subnets.isEmpty) {
+      PrinterLogger.error(_tag, 'No usable local subnet found — aborting scan');
       _setState(PrinterConnectionState.disconnected);
       throw const PrinterNetworkUnavailableException(
         'Cannot determine local WiFi IP address. '
@@ -109,22 +117,12 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       );
     }
 
-    // Derive subnet prefix (e.g. '192.168.1')
-    final List<String> parts = localIp.split('.');
-    if (parts.length != 4) {
-      PrinterLogger.error(_tag, 'Invalid IP format: $localIp');
-      _setState(PrinterConnectionState.disconnected);
-      return;
-    }
-
-    final String subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
-
     // Each probe gets the full scan timeout so slow printers are not missed.
     final Duration probeTimeout = timeout;
 
     PrinterLogger.info(
       _tag,
-      'Scanning subnet $subnet.* on port $scanPort '
+      'Scanning ${subnets.length} subnet(s) ${subnets.join(', ')} on port $scanPort '
       '(timeout: ${probeTimeout.inSeconds}s)',
     );
 
@@ -132,37 +130,43 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     final StreamController<List<NetworkPrinterDevice>> controller =
         StreamController<List<NetworkPrinterDevice>>();
 
-    // Fan-out 254 parallel TCP probe connections.
-    final List<Future<void>> probes = List.generate(254, (i) async {
-      final String host = '$subnet.${i + 1}';
+    // Fan-out 254 parallel TCP probe connections per subnet — runs all
+    // subnets concurrently so total scan time stays bounded by the
+    // probe timeout, not multiplied by the subnet count.
+    final List<Future<void>> probes = <Future<void>>[];
+    for (final String subnet in subnets) {
+      for (int i = 1; i <= 254; i++) {
+        final String host = '$subnet.$i';
+        probes.add(Future<void>(() async {
+          try {
+            final Socket s = await Socket.connect(
+              host,
+              scanPort,
+              timeout: probeTimeout,
+            );
 
-      try {
-        final Socket s = await Socket.connect(
-          host,
-          scanPort,
-          timeout: probeTimeout,
-        );
+            await s.close();
+            s.destroy();
 
-        await s.close();
-        s.destroy();
+            PrinterLogger.info(_tag, 'Found printer at $host:$scanPort');
 
-        PrinterLogger.info(_tag, 'Found printer at $host:$scanPort');
-
-        final NetworkPrinterDevice device = NetworkPrinterDevice(
-          name: host,
-          host: host,
-          port: scanPort,
-        );
-        found.add(device);
-        controller.add(List<NetworkPrinterDevice>.unmodifiable(found));
-      } on SocketException {
-        // Host not reachable — connection refused.
-      } on TimeoutException {
-        // Host not reachable within timeout — expected for most IPs
-      } catch (e) {
-        PrinterLogger.debug(_tag, '$host — unexpected error: $e');
+            final NetworkPrinterDevice device = NetworkPrinterDevice(
+              name: host,
+              host: host,
+              port: scanPort,
+            );
+            found.add(device);
+            controller.add(List<NetworkPrinterDevice>.unmodifiable(found));
+          } on SocketException {
+            // Host not reachable — connection refused.
+          } on TimeoutException {
+            // Host not reachable within timeout — expected for most IPs
+          } catch (e) {
+            PrinterLogger.debug(_tag, '$host — unexpected error: $e');
+          }
+        }));
       }
-    });
+    }
 
     // Close stream when all probes finish.
     Future.wait(probes).whenComplete(() {

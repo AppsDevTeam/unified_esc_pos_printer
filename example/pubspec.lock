@@ -138,7 +138,7 @@ packages:
       path: ".."
       relative: true
     source: path
-    version: "3.7.1"
+    version: "3.8.0"
   usb_serial:
     dependency: transitive
     description:
