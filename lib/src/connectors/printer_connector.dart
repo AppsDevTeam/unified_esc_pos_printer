@@ -37,9 +37,20 @@ abstract class PrinterConnector<T extends PrinterDevice> {
 
   /// Write raw ESC/POS [bytes] to the connected printer.
   ///
+  /// When [verifyStatus] is `true` (default), the connector also runs
+  /// its pre-write and post-write status checks (DLE EOT polling +
+  /// retry, and ASB pre-write/post-write gating when ASB is active).
+  /// Set to `false` for control-byte sends — drawer open, LED toggle,
+  /// short test sequences — where the latency of a status round-trip
+  /// is unwanted and a fault on those bytes wouldn't change the
+  /// caller's behavior anyway.
+  ///
   /// Throws [PrinterStateException] if not connected.
   /// Throws [PrinterWriteException] if the write fails.
-  Future<void> writeBytes(List<int> bytes);
+  /// Throws [PrinterDeviceException] when [verifyStatus] is `true` and
+  /// the printer reports an error in its pre-write or post-write
+  /// status check.
+  Future<void> writeBytes(List<int> bytes, {bool verifyStatus = true});
 
   /// Send a DLE EOT status query and return the parsed result.
   ///
@@ -62,6 +73,23 @@ abstract class PrinterConnector<T extends PrinterDevice> {
   ///
   /// Throws [PrinterStateException] if not connected.
   Future<int> queryStatusByte(int n, {int timeoutMs = 2000});
+
+  /// Send arbitrary [request] bytes and return the first response byte,
+  /// or `-1` on timeout / transport without read capability.
+  ///
+  /// Escape hatch for experimenting with non-standard status protocols —
+  /// e.g. `GS r 1` (paper sensor, in-queue), `ESC v` (older paper-end
+  /// query), or vendor-specific commands — without having to add a new
+  /// dedicated method per command. Callers parse the returned byte
+  /// themselves.
+  ///
+  /// Default implementation returns `-1`; concrete connectors with a
+  /// read-back path override it.
+  ///
+  /// Throws [PrinterStateException] if not connected.
+  Future<int> queryRawByte(List<int> request, {int timeoutMs = 500}) async {
+    return -1;
+  }
 
   /// Whether the currently-connected printer responded to a DLE EOT 1 probe
   /// during [connect]. Many cheap thermal printers don't implement DLE EOT;

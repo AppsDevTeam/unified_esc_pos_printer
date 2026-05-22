@@ -5,9 +5,11 @@ public class UnifiedEscPosPrinterPlugin: NSObject, FlutterPlugin {
     private var methodChannel: FlutterMethodChannel?
     private var bleScanEventChannel: FlutterEventChannel?
     private var connectionStateEventChannel: FlutterEventChannel?
+    private var incomingBytesEventChannel: FlutterEventChannel?
 
     private var bleManager: BleManager?
     private var connectionStateHandler: ConnectionStateStreamHandler?
+    private var incomingBytesHandler: IncomingBytesStreamHandler?
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = UnifiedEscPosPrinterPlugin()
@@ -45,6 +47,18 @@ public class UnifiedEscPosPrinterPlugin: NSObject, FlutterPlugin {
             binaryMessenger: messenger
         )
         connectionStateEventChannel?.setStreamHandler(connectionStateHandler)
+
+        // Incoming bytes channel — receives BLE notify-characteristic
+        // pushes (iOS doesn't support Bluetooth Classic so there's no
+        // BT-side input). Used by the Dart-side AsbMonitor to parse
+        // Automatic Status Back (ESC/POS `GS a`) packets and surface
+        // paper-out / cover-open events before they tank a print job.
+        incomingBytesHandler = IncomingBytesStreamHandler(bleManager: bleManager!)
+        incomingBytesEventChannel = FlutterEventChannel(
+            name: "com.elriztechnology.unified_esc_pos_printer/incoming_bytes",
+            binaryMessenger: messenger
+        )
+        incomingBytesEventChannel?.setStreamHandler(incomingBytesHandler)
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -126,6 +140,37 @@ class ConnectionStateStreamHandler: NSObject, FlutterStreamHandler {
 
     func onCancel(withArguments arguments: Any?) -> FlutterError? {
         bleManager.connectionStateCallback = nil
+        return nil
+    }
+}
+
+// MARK: - IncomingBytesStreamHandler
+
+/// Forwards bytes from BLE notify characteristics to the Dart side.
+/// Each event is a map `{"type": "ble", "deviceId": <id>, "bytes": <Data>}`
+/// — consumed per-device by the AsbMonitor in the Dart connector.
+class IncomingBytesStreamHandler: NSObject, FlutterStreamHandler {
+    private let bleManager: BleManager
+
+    init(bleManager: BleManager) {
+        self.bleManager = bleManager
+    }
+
+    func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+        bleManager.incomingBytesCallback = { deviceId, data in
+            DispatchQueue.main.async {
+                events([
+                    "type": "ble",
+                    "deviceId": deviceId,
+                    "bytes": FlutterStandardTypedData(bytes: data),
+                ])
+            }
+        }
+        return nil
+    }
+
+    func onCancel(withArguments arguments: Any?) -> FlutterError? {
+        bleManager.incomingBytesCallback = nil
         return nil
     }
 }

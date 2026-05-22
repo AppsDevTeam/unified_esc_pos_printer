@@ -12,6 +12,7 @@ import '../../models/printer_status_detail.dart';
 import '../../utils/printer_logger.dart';
 import '../asb_monitor.dart';
 import '../post_write_status.dart';
+import '../pre_write_status.dart';
 import 'usb_connector_interface.dart';
 
 const String _tag = 'USB-Android';
@@ -247,19 +248,33 @@ class UsbConnectorImpl extends UsbConnectorBase {
   }
 
   @override
-  Future<void> writeBytes(List<int> bytes) async {
+  Future<void> writeBytes(List<int> bytes, {bool verifyStatus = true}) async {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
 
     final AsbMonitor? asb = _asb;
-    if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
-      PrinterLogger.error(
-        _tag,
-        'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
-      );
-      throw PrinterDeviceException(
-        'Printer reports an error condition',
-        detail: asb.latest,
-      );
+    if (verifyStatus) {
+      if (asb == null || !asb.isEnabled) {
+        // See NetworkConnector for the rationale — quick DLE EOT poll
+        // before the write so we catch mid-session error states and
+        // late-bind realtime-status support on first positive response.
+        _supportsRealtimeStatus = await verifyBeforeWrite(
+          queryStatusByteFn: (int n, int timeoutMs) =>
+              queryStatusByte(n, timeoutMs: timeoutMs),
+          supportsRealtimeStatus: _supportsRealtimeStatus,
+          tag: _tag,
+        );
+      }
+
+      if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
+        PrinterLogger.error(
+          _tag,
+          'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
+        );
+        throw PrinterDeviceException(
+          'Printer reports an error condition',
+          detail: asb.latest,
+        );
+      }
     }
 
     _setState(PrinterConnectionState.printing);
@@ -280,6 +295,8 @@ class UsbConnectorImpl extends UsbConnectorBase {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('USB write failed', cause: e);
     }
+
+    if (!verifyStatus) return;
 
     if (asb != null && asb.isEnabled) {
       if (asb.latest.hasAnyProblem) {
@@ -341,6 +358,36 @@ class UsbConnectorImpl extends UsbConnectorBase {
     ]);
     await sub.cancel();
     return rawStatus;
+  }
+
+  @override
+  Future<int> queryRawByte(List<int> request, {int timeoutMs = 500}) async {
+    _assertState(PrinterConnectionState.connected, 'queryRawByte');
+
+    final UsbPort? port = _port;
+    final Stream<Uint8List>? input = _inboundStream;
+    if (port == null || input == null) return -1;
+
+    final Completer<int> completer = Completer<int>();
+    final StreamSubscription<Uint8List> sub = input.listen(
+      (Uint8List data) {
+        if (!completer.isCompleted && data.isNotEmpty) {
+          completer.complete(data.first);
+        }
+      },
+      onError: (Object e) {
+        if (!completer.isCompleted) completer.complete(-1);
+      },
+    );
+
+    await port.write(Uint8List.fromList(request));
+
+    final int rawResponse = await Future.any<int>([
+      completer.future,
+      Future<int>.delayed(Duration(milliseconds: timeoutMs), () => -1),
+    ]);
+    await sub.cancel();
+    return rawResponse;
   }
 
   @override

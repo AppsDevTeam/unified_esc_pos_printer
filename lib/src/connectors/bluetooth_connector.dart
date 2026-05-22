@@ -14,6 +14,7 @@ import '../models/printer_status_detail.dart';
 import '../utils/printer_logger.dart';
 import 'asb_monitor.dart';
 import 'post_write_status.dart';
+import 'pre_write_status.dart';
 import 'printer_connector.dart';
 
 const String _tag = 'Bluetooth';
@@ -326,19 +327,33 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
   }
 
   @override
-  Future<void> writeBytes(List<int> bytes) async {
+  Future<void> writeBytes(List<int> bytes, {bool verifyStatus = true}) async {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
 
     final AsbMonitor? asb = _asb;
-    if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
-      PrinterLogger.error(
-        _tag,
-        'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
-      );
-      throw PrinterDeviceException(
-        'Printer reports an error condition',
-        detail: asb.latest,
-      );
+    if (verifyStatus) {
+      if (asb == null || !asb.isEnabled) {
+        // See NetworkConnector for the rationale — quick DLE EOT poll
+        // before the write so we catch mid-session error states and
+        // late-bind realtime-status support on first positive response.
+        _supportsRealtimeStatus = await verifyBeforeWrite(
+          queryStatusByteFn: (int n, int timeoutMs) =>
+              queryStatusByte(n, timeoutMs: timeoutMs),
+          supportsRealtimeStatus: _supportsRealtimeStatus,
+          tag: _tag,
+        );
+      }
+
+      if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
+        PrinterLogger.error(
+          _tag,
+          'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
+        );
+        throw PrinterDeviceException(
+          'Printer reports an error condition',
+          detail: asb.latest,
+        );
+      }
     }
 
     _setState(PrinterConnectionState.printing);
@@ -367,6 +382,8 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('Bluetooth write failed', cause: e);
     }
+
+    if (!verifyStatus) return;
 
     if (asb != null && asb.isEnabled) {
       if (asb.latest.hasAnyProblem) {
@@ -419,6 +436,73 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       PrinterLogger.warning(_tag, 'btQueryStatus failed: ${e.message}');
       return -1;
     }
+  }
+
+  @override
+  Future<int> queryRawByte(List<int> request, {int timeoutMs = 500}) async {
+    _assertState(PrinterConnectionState.connected, 'queryRawByte');
+
+    // Refuse to interleave with an active ASB stream — the response
+    // byte would be eaten by the AsbMonitor's packet buffer and we'd
+    // never see it (or worse, corrupt the next ASB packet boundary).
+    final AsbMonitor? asb = _asb;
+    if (asb != null && asb.isEnabled) {
+      PrinterLogger.warning(
+        _tag,
+        'queryRawByte refused: ASB stream active on this connection',
+      );
+      return -1;
+    }
+
+    final String address = _connectedAddress ?? '';
+    final Completer<int> completer = Completer<int>();
+    StreamSubscription<Map<String, dynamic>>? sub;
+
+    try {
+      sub = _platform.incomingBytesStream
+          .where((Map<String, dynamic> event) =>
+              event['type'] == 'bt' && event['deviceId'] == address)
+          .listen(
+        (Map<String, dynamic> event) {
+          if (completer.isCompleted) return;
+          final Object? raw = event['bytes'];
+          List<int>? bytes;
+          if (raw is Uint8List) bytes = raw;
+          if (raw is List<int>) bytes = raw;
+          if (bytes != null && bytes.isNotEmpty) {
+            completer.complete(bytes.first);
+          }
+        },
+        onError: (Object e) {
+          if (!completer.isCompleted) completer.complete(-1);
+        },
+        onDone: () {
+          if (!completer.isCompleted) completer.complete(-1);
+        },
+        cancelOnError: true,
+      );
+    } catch (e) {
+      PrinterLogger.warning(_tag, 'queryRawByte listen failed: $e');
+      return -1;
+    }
+
+    try {
+      await _platform.btWrite(
+        address: address,
+        data: Uint8List.fromList(request),
+      );
+    } catch (e) {
+      PrinterLogger.warning(_tag, 'queryRawByte write failed: $e');
+      await sub.cancel();
+      return -1;
+    }
+
+    final int rawResponse = await Future.any<int>([
+      completer.future,
+      Future<int>.delayed(Duration(milliseconds: timeoutMs), () => -1),
+    ]);
+    await sub.cancel();
+    return rawResponse;
   }
 
   // ── Disconnection ──────────────────────────────────────────────────────────

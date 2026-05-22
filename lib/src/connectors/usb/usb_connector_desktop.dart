@@ -133,7 +133,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
   }
 
   @override
-  Future<void> writeBytes(List<int> bytes) async {
+  Future<void> writeBytes(List<int> bytes, {bool verifyStatus = true}) async {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
     _setState(PrinterConnectionState.printing);
     try {

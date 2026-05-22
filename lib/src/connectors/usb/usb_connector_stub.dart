@@ -43,7 +43,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
   }
 
   @override
-  Future<void> writeBytes(List<int> bytes) {
+  Future<void> writeBytes(List<int> bytes, {bool verifyStatus = true}) {
     return throw const PrinterPlatformUnsupportedException(
       'USB printing is not supported on this platform',
     );

@@ -58,6 +58,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
   String? _connectedDeviceId;
   StreamSubscription<Map<String, dynamic>>? _connectionSub;
   AsbMonitor? _asb;
+  bool? _supportsRealtimeStatus;
 
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
   final StreamController<PrinterConnectionState> _stateController =
@@ -69,11 +70,13 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
   @override
   PrinterConnectionState get state => _state;
 
-  /// BLE without an RX characteristic cannot read back DLE EOT responses
-  /// at all, so the probe is meaningless here — always reports `null`
-  /// ("unknown / no real-time status available").
+  /// Set at connect time by [probeRealtimeStatus] (when ASB is not
+  /// negotiated). `true` means a notify characteristic was discovered
+  /// AND the printer answered a DLE EOT 1 probe through it — DLE EOT
+  /// real-time status is reliable on this connection. `false` / `null`
+  /// means we have no read-back path; status checks become best-effort.
   @override
-  bool? get supportsRealtimeStatus => null;
+  bool? get supportsRealtimeStatus => _supportsRealtimeStatus;
 
   @override
   bool get supportsAsb => _asb?.isEnabled ?? false;
@@ -316,15 +319,29 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     if (!asbOk) {
       await monitor.dispose();
       _asb = null;
+      // No ASB push channel — fall back to polling DLE EOT through the
+      // notify characteristic (if one was discovered during connect).
+      // probeRealtimeStatus sets `_supportsRealtimeStatus` to `true`
+      // when the printer answers, so subsequent pre/post-write checks
+      // can rely on real-time status; otherwise it stays null and
+      // writes proceed optimistically.
+      _supportsRealtimeStatus = await probeRealtimeStatus(
+        queryStatusByteFn: (int n, int timeoutMs) =>
+            queryStatusByte(n, timeoutMs: timeoutMs),
+        tag: _tag,
+      );
     }
   }
 
   @override
-  Future<void> writeBytes(List<int> bytes) async {
+  Future<void> writeBytes(List<int> bytes, {bool verifyStatus = true}) async {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
 
     final AsbMonitor? asb = _asb;
-    if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
+    if (verifyStatus &&
+        asb != null &&
+        asb.isEnabled &&
+        asb.latest.hasAnyProblem) {
       PrinterLogger.error(
         _tag,
         'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
@@ -375,6 +392,8 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
       throw PrinterWriteException('BLE write failed', cause: e);
     }
 
+    if (!verifyStatus) return;
+
     if (asb != null && asb.isEnabled) {
       if (asb.latest.hasAnyProblem) {
         PrinterLogger.error(
@@ -413,14 +432,85 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     return status;
   }
 
-  /// BLE without an RX characteristic cannot read back the printer's DLE EOT
-  /// response, so this connector cannot retrieve the raw status byte for any
-  /// `n`. Returns `-1` (unknown) for all values — callers will treat this as
-  /// "no detail available" and fall back to a generic message.
   @override
   Future<int> queryStatusByte(int n, {int timeoutMs = 2000}) async {
-    _assertState(PrinterConnectionState.connected, 'queryStatusByte');
-    return -1;
+    return queryRawByte(<int>[0x10, 0x04, n & 0xFF], timeoutMs: timeoutMs);
+  }
+
+  /// Reads a 1-byte response from the notify characteristic discovered
+  /// during connect. Works only on printers whose GATT profile exposes
+  /// a notify / indicate characteristic in the same service as the TX
+  /// characteristic (no RX path → timeout returns `-1`). Bypasses
+  /// itself when ASB is active — the per-ASB-packet 4-byte boundary
+  /// would be corrupted by interleaving single DLE EOT responses on
+  /// the same stream.
+  @override
+  Future<int> queryRawByte(List<int> request, {int timeoutMs = 500}) async {
+    _assertState(PrinterConnectionState.connected, 'queryRawByte');
+
+    final AsbMonitor? asb = _asb;
+    if (asb != null && asb.isEnabled) {
+      PrinterLogger.warning(
+        _tag,
+        'queryRawByte refused: ASB stream active on this connection',
+      );
+      return -1;
+    }
+
+    final String deviceId = _connectedDeviceId ?? '';
+    if (deviceId.isEmpty) return -1;
+
+    final Completer<int> completer = Completer<int>();
+    StreamSubscription<Map<String, dynamic>>? sub;
+
+    try {
+      sub = _platform.incomingBytesStream
+          .where((Map<String, dynamic> event) =>
+              event['type'] == 'ble' && event['deviceId'] == deviceId)
+          .listen(
+        (Map<String, dynamic> event) {
+          if (completer.isCompleted) return;
+          final Object? raw = event['bytes'];
+          List<int>? bytes;
+          if (raw is Uint8List) bytes = raw;
+          if (raw is List<int>) bytes = raw;
+          if (bytes != null && bytes.isNotEmpty) {
+            completer.complete(bytes.first);
+          }
+        },
+        onError: (Object e) {
+          if (!completer.isCompleted) completer.complete(-1);
+        },
+        onDone: () {
+          if (!completer.isCompleted) completer.complete(-1);
+        },
+        cancelOnError: true,
+      );
+    } catch (e) {
+      // Platform channel handler may be missing on transports that
+      // don't expose an inbound byte stream (e.g. iOS pre-fix builds).
+      PrinterLogger.warning(_tag, 'queryRawByte listen failed: $e');
+      return -1;
+    }
+
+    try {
+      await _platform.bleWrite(
+        deviceId: deviceId,
+        data: Uint8List.fromList(request),
+        withoutResponse: _writeWithoutResponse,
+      );
+    } catch (e) {
+      PrinterLogger.warning(_tag, 'queryRawByte write failed: $e');
+      await sub.cancel();
+      return -1;
+    }
+
+    final int rawResponse = await Future.any<int>([
+      completer.future,
+      Future<int>.delayed(Duration(milliseconds: timeoutMs), () => -1),
+    ]);
+    await sub.cancel();
+    return rawResponse;
   }
 
   @override

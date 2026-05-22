@@ -11,6 +11,7 @@ import '../models/printer_status_detail.dart';
 import '../utils/printer_logger.dart';
 import 'asb_monitor.dart';
 import 'post_write_status.dart';
+import 'pre_write_status.dart';
 import 'printer_connector.dart';
 
 const String _tag = 'Network';
@@ -214,9 +215,26 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       // Watch for remote close — printer-side idle timeout, network glitch,
       // FIN/RST from the router. PrintManager._ensureConnected will see
       // state != connected on the next print and dial up fresh.
+      //
+      // Capture the socket reference so the late-firing callback can
+      // distinguish "I closed THIS socket" from "I already moved on to a
+      // new connection". Without that check, a reconnect arriving between
+      // the old socket's close() returning and its done future firing
+      // would have the callback nuke the fresh ASB monitor / socket.
+      final Socket socketRef = socket;
       // ignore: discarded_futures
-      socket.done
-          .then((_) => _onSocketDone(local: _disconnectInitiatedLocally));
+      socket.done.then((_) async {
+        if (_socket != socketRef) {
+          PrinterLogger.debug(
+            _tag,
+            'Socket.done from stale reference — already replaced, ignoring',
+          );
+          return;
+        }
+        await _onSocketDone(local: _disconnectInitiatedLocally);
+      }).catchError((Object e) {
+        PrinterLogger.warning(_tag, 'socket.done handler failed: $e');
+      });
 
       // Send ESC @ to initialise the printer on connect.
       socket.add(cInit.codeUnits);
@@ -275,23 +293,40 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
   }
 
   @override
-  Future<void> writeBytes(List<int> bytes) async {
+  Future<void> writeBytes(List<int> bytes, {bool verifyStatus = true}) async {
     _assertState(PrinterConnectionState.connected, 'writeBytes');
 
-    // Gate the print on the most recent ASB status — refusing to send
-    // bytes to a printer that has already reported a fault is cheaper
-    // than transferring 20 KB of raster into a printer that can't use
-    // them and then trying to recover.
     final AsbMonitor? asb = _asb;
-    if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
-      PrinterLogger.error(
-        _tag,
-        'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
-      );
-      throw PrinterDeviceException(
-        'Printer reports an error condition',
-        detail: asb.latest,
-      );
+    if (verifyStatus) {
+      // When ASB is not handling status pushes for us, do a quick DLE EOT
+      // ping before the write. Catches "printer fell into error state
+      // mid-session" cases that the connect-time probe couldn't see, and
+      // late-binds `supportsRealtimeStatus = true` the moment the printer
+      // proves it speaks the protocol — so subsequent timeouts become
+      // genuine error signals rather than "doesn't support DLE EOT".
+      if (asb == null || !asb.isEnabled) {
+        _supportsRealtimeStatus = await verifyBeforeWrite(
+          queryStatusByteFn: (int n, int timeoutMs) =>
+              queryStatusByte(n, timeoutMs: timeoutMs),
+          supportsRealtimeStatus: _supportsRealtimeStatus,
+          tag: _tag,
+        );
+      }
+
+      // Gate the print on the most recent ASB status — refusing to send
+      // bytes to a printer that has already reported a fault is cheaper
+      // than transferring 20 KB of raster into a printer that can't use
+      // them and then trying to recover.
+      if (asb != null && asb.isEnabled && asb.latest.hasAnyProblem) {
+        PrinterLogger.error(
+          _tag,
+          'Pre-write: refusing print, ASB reports problem: ${asb.latest}',
+        );
+        throw PrinterDeviceException(
+          'Printer reports an error condition',
+          detail: asb.latest,
+        );
+      }
     }
 
     _setState(PrinterConnectionState.printing);
@@ -310,6 +345,8 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       _setState(PrinterConnectionState.disconnected);
       throw PrinterWriteException('Failed to write bytes to printer', cause: e);
     }
+
+    if (!verifyStatus) return;
 
     if (asb != null && asb.isEnabled) {
       // ASB pushes any post-write status change asynchronously — no need
@@ -387,6 +424,45 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
     final int rawStatus = await Future.any([completer.future, timeoutFuture]);
     await sub.cancel();
     return rawStatus;
+  }
+
+  @override
+  Future<int> queryRawByte(List<int> request, {int timeoutMs = 500}) async {
+    _assertState(PrinterConnectionState.connected, 'queryRawByte');
+
+    final Socket? sock = _socket;
+    final Stream<List<int>>? inbound = _inboundStream;
+    if (sock == null || inbound == null) return -1;
+
+    final Completer<int> completer = Completer<int>();
+    StreamSubscription<List<int>>? sub;
+
+    sub = inbound.listen(
+      (List<int> data) {
+        if (!completer.isCompleted && data.isNotEmpty) {
+          completer.complete(data.first);
+          sub?.cancel();
+        }
+      },
+      onError: (Object e) {
+        if (!completer.isCompleted) completer.complete(-1);
+      },
+      onDone: () {
+        if (!completer.isCompleted) completer.complete(-1);
+      },
+    );
+
+    sock.add(request);
+    await sock.flush();
+
+    final Future<int> timeoutFuture = Future<int>.delayed(
+      Duration(milliseconds: timeoutMs),
+      () => -1,
+    );
+
+    final int rawResponse = await Future.any([completer.future, timeoutFuture]);
+    await sub.cancel();
+    return rawResponse;
   }
 
   // ── Disconnection ──────────────────────────────────────────────────────────
