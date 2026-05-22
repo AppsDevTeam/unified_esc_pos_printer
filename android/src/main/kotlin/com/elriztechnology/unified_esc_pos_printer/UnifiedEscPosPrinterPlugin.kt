@@ -17,6 +17,7 @@ class UnifiedEscPosPrinterPlugin : FlutterPlugin, MethodCallHandler, ActivityAwa
     private lateinit var bleScanEventChannel: EventChannel
     private lateinit var btScanEventChannel: EventChannel
     private lateinit var connectionStateEventChannel: EventChannel
+    private lateinit var incomingBytesEventChannel: EventChannel
 
     private lateinit var permissionHandler: PermissionHandler
     private lateinit var bleManager: BleManager
@@ -35,6 +36,7 @@ class UnifiedEscPosPrinterPlugin : FlutterPlugin, MethodCallHandler, ActivityAwa
         bleScanEventChannel = EventChannel(messenger, "com.elriztechnology.unified_esc_pos_printer/ble_scan")
         btScanEventChannel = EventChannel(messenger, "com.elriztechnology.unified_esc_pos_printer/bt_scan")
         connectionStateEventChannel = EventChannel(messenger, "com.elriztechnology.unified_esc_pos_printer/connection_state")
+        incomingBytesEventChannel = EventChannel(messenger, "com.elriztechnology.unified_esc_pos_printer/incoming_bytes")
 
         permissionHandler = PermissionHandler()
         bleManager = BleManager(context)
@@ -43,6 +45,7 @@ class UnifiedEscPosPrinterPlugin : FlutterPlugin, MethodCallHandler, ActivityAwa
         bleScanEventChannel.setStreamHandler(bleManager.scanStreamHandler)
         btScanEventChannel.setStreamHandler(bluetoothClassicManager.scanStreamHandler)
         connectionStateEventChannel.setStreamHandler(ConnectionStateStreamHandler(bleManager, bluetoothClassicManager))
+        incomingBytesEventChannel.setStreamHandler(IncomingBytesStreamHandler(bleManager, bluetoothClassicManager))
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -50,6 +53,7 @@ class UnifiedEscPosPrinterPlugin : FlutterPlugin, MethodCallHandler, ActivityAwa
         bleScanEventChannel.setStreamHandler(null)
         btScanEventChannel.setStreamHandler(null)
         connectionStateEventChannel.setStreamHandler(null)
+        incomingBytesEventChannel.setStreamHandler(null)
         bleManager.dispose()
         bluetoothClassicManager.dispose()
     }
@@ -192,5 +196,30 @@ class ConnectionStateStreamHandler(
         bleManager.connectionStateCallback = null
         btManager.connectionStateCallback = null
         eventSink = null
+    }
+}
+
+/// Forwards raw incoming bytes from BLE notify characteristic and
+/// Bluetooth Classic input stream to Dart. Each event is a map:
+///   {"type": "ble" | "bt", "deviceId": <id>, "bytes": <ByteArray>}
+/// so the Dart side can filter per-device. Consumed by the per-connector
+/// `AsbMonitor` to parse Automatic Status Back (ESC/POS `GS a`) packets.
+class IncomingBytesStreamHandler(
+    private val bleManager: BleManager,
+    private val btManager: BluetoothClassicManager
+) : EventChannel.StreamHandler {
+
+    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+        bleManager.incomingBytesCallback = { deviceId, bytes ->
+            events?.success(mapOf("type" to "ble", "deviceId" to deviceId, "bytes" to bytes))
+        }
+        btManager.incomingBytesCallback = { address, bytes ->
+            events?.success(mapOf("type" to "bt", "deviceId" to address, "bytes" to bytes))
+        }
+    }
+
+    override fun onCancel(arguments: Any?) {
+        bleManager.incomingBytesCallback = null
+        btManager.incomingBytesCallback = null
     }
 }

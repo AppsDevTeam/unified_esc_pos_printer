@@ -1,6 +1,7 @@
 import '../models/printer_connection_state.dart';
 import '../models/printer_device.dart';
 import '../models/printer_status.dart';
+import '../models/printer_status_detail.dart';
 
 /// Abstract base for all connection-type-specific connectors.
 ///
@@ -36,9 +37,20 @@ abstract class PrinterConnector<T extends PrinterDevice> {
 
   /// Write raw ESC/POS [bytes] to the connected printer.
   ///
+  /// When [verifyStatus] is `true` (default), the connector also runs
+  /// its pre-write and post-write status checks (DLE EOT polling +
+  /// retry, and ASB pre-write/post-write gating when ASB is active).
+  /// Set to `false` for control-byte sends — drawer open, LED toggle,
+  /// short test sequences — where the latency of a status round-trip
+  /// is unwanted and a fault on those bytes wouldn't change the
+  /// caller's behavior anyway.
+  ///
   /// Throws [PrinterStateException] if not connected.
   /// Throws [PrinterWriteException] if the write fails.
-  Future<void> writeBytes(List<int> bytes);
+  /// Throws [PrinterDeviceException] when [verifyStatus] is `true` and
+  /// the printer reports an error in its pre-write or post-write
+  /// status check.
+  Future<void> writeBytes(List<int> bytes, {bool verifyStatus = true});
 
   /// Send a DLE EOT status query and return the parsed result.
   ///
@@ -62,6 +74,23 @@ abstract class PrinterConnector<T extends PrinterDevice> {
   /// Throws [PrinterStateException] if not connected.
   Future<int> queryStatusByte(int n, {int timeoutMs = 2000});
 
+  /// Send arbitrary [request] bytes and return the first response byte,
+  /// or `-1` on timeout / transport without read capability.
+  ///
+  /// Escape hatch for experimenting with non-standard status protocols —
+  /// e.g. `GS r 1` (paper sensor, in-queue), `ESC v` (older paper-end
+  /// query), or vendor-specific commands — without having to add a new
+  /// dedicated method per command. Callers parse the returned byte
+  /// themselves.
+  ///
+  /// Default implementation returns `-1`; concrete connectors with a
+  /// read-back path override it.
+  ///
+  /// Throws [PrinterStateException] if not connected.
+  Future<int> queryRawByte(List<int> request, {int timeoutMs = 500}) async {
+    return -1;
+  }
+
   /// Whether the currently-connected printer responded to a DLE EOT 1 probe
   /// during [connect]. Many cheap thermal printers don't implement DLE EOT;
   /// for those we have no way to tell "post-write timeout = error" from
@@ -74,6 +103,32 @@ abstract class PrinterConnector<T extends PrinterDevice> {
   /// - `null`: probe has not run yet (not connected, transport that cannot
   ///   read back like BLE/Windows spooler).
   bool? get supportsRealtimeStatus;
+
+  /// Whether the currently-connected printer has been confirmed to push
+  /// Automatic Status Back (ASB) packets, enabled at connect via the
+  /// `GS a n` ESC/POS command. When `true` the connector relies on ASB
+  /// pushes for status (mutually exclusive with DLE EOT polling on the
+  /// same byte stream); when `false` (or `null`) the connector falls
+  /// back to DLE EOT polling and treats writes as best-effort.
+  ///
+  /// Default: `false` — transports that don't expose an inbound byte
+  /// stream (current iOS BLE, Windows print spooler, …) override
+  /// nothing and inherit the safe default.
+  bool get supportsAsb => false;
+
+  /// Latest [PrinterStatusDetail] reported by the printer via an ASB
+  /// push. Empty (`isUnknown == true`) before the first ASB packet
+  /// arrives or when [supportsAsb] is `false`.
+  ///
+  /// Connectors gate [writeBytes] on `latestAsbStatus.hasAnyProblem`
+  /// when [supportsAsb] is `true` — a printer that reports paper-out
+  /// must not be sent a job that would just sit in its buffer.
+  PrinterStatusDetail get latestAsbStatus => const PrinterStatusDetail();
+
+  /// Pushed every time a fresh ASB packet is parsed. Empty stream if
+  /// ASB is not supported on this connection.
+  Stream<PrinterStatusDetail> get asbStatusStream =>
+      const Stream<PrinterStatusDetail>.empty();
 
   /// Disconnect from the current printer.
   Future<void> disconnect();

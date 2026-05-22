@@ -138,16 +138,16 @@ packages:
       path: ".."
       relative: true
     source: path
-    version: "3.6.0"
+    version: "3.7.1"
   usb_serial:
     dependency: transitive
     description:
       path: "."
-      ref: "v0.7.0"
-      resolved-ref: c9e59ee86dda6d532965f6a256af3fa76bccdf37
+      ref: "v0.8.0"
+      resolved-ref: "45a98630f853a62e1c4a2deb69d95de156d5571b"
       url: "https://github.com/AppsDevTeam/usbserial.git"
     source: git
-    version: "0.7.0"
+    version: "0.8.0"
   vector_math:
     dependency: transitive
     description:

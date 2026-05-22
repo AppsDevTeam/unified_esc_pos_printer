@@ -84,8 +84,9 @@ class PrinterManager {
     },
   }) {
     // Drop connection types that are not supported on the current platform.
-    final Set<PrinterConnectionType> unsupported =
-        types.where((PrinterConnectionType t) => !t.isSupportedOnCurrentPlatform).toSet();
+    final Set<PrinterConnectionType> unsupported = types
+        .where((PrinterConnectionType t) => !t.isSupportedOnCurrentPlatform)
+        .toSet();
     if (unsupported.isNotEmpty) {
       PrinterLogger.warning(
         _tag,
@@ -247,21 +248,31 @@ class PrinterManager {
 
   /// Send the bytes from [ticket] to the connected printer.
   Future<void> printTicket(Ticket ticket) async {
-    final PrinterConnector<PrinterDevice> connector = _assertConnected('printTicket');
+    final PrinterConnector<PrinterDevice> connector =
+        _assertConnected('printTicket');
     PrinterLogger.info(_tag, 'Printing ticket (${ticket.bytes.length} bytes)');
     await connector.writeBytes(ticket.bytes);
   }
 
   /// Send raw [bytes] to the connected printer.
-  Future<void> printBytes(List<int> bytes) async {
-    final PrinterConnector<PrinterDevice> connector = _assertConnected('printBytes');
+  ///
+  /// [verifyStatus] is forwarded to the connector — defaults to `true`
+  /// so the active connector runs its pre/post-write status checks
+  /// (DLE EOT polling, ASB gating). Set to `false` for short control
+  /// sequences (cash drawer kick, LED toggle, init bytes) where the
+  /// extra round-trip latency is unwanted and a fault on those bytes
+  /// wouldn't change the caller's behavior anyway.
+  Future<void> printBytes(List<int> bytes, {bool verifyStatus = true}) async {
+    final PrinterConnector<PrinterDevice> connector =
+        _assertConnected('printBytes');
     PrinterLogger.debug(_tag, 'Printing ${bytes.length} raw bytes');
-    await connector.writeBytes(bytes);
+    await connector.writeBytes(bytes, verifyStatus: verifyStatus);
   }
 
   /// Open the cash drawer connected to [pin] (default: pin 2).
   Future<void> openCashDrawer({CashDrawer pin = CashDrawer.pin2}) async {
-    final PrinterConnector<PrinterDevice> connector = _assertConnected('openCashDrawer');
+    final PrinterConnector<PrinterDevice> connector =
+        _assertConnected('openCashDrawer');
     PrinterLogger.info(_tag, 'Opening cash drawer (${pin.name})');
 
     final List<int> bytes = pin == CashDrawer.pin2
@@ -276,7 +287,8 @@ class PrinterManager {
   /// Returns [PrinterStatus.timeout] when the printer does not respond within
   /// [timeoutMs] milliseconds or does not support DLE EOT (e.g. USB).
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) async {
-    final PrinterConnector<PrinterDevice> connector = _assertConnected('queryStatus');
+    final PrinterConnector<PrinterDevice> connector =
+        _assertConnected('queryStatus');
     return connector.queryStatus(timeoutMs: timeoutMs);
   }
 
@@ -300,6 +312,19 @@ class PrinterManager {
       eot3: eot3,
       eot4: eot4,
     );
+  }
+
+  /// Sends arbitrary [request] bytes and returns the first response byte,
+  /// or `-1` on timeout or when the active transport can't read back.
+  ///
+  /// Escape hatch for experimenting with non-standard status protocols
+  /// (e.g. `GS r 1` paper sensor query, `ESC v` legacy paper-end query,
+  /// or vendor-specific commands) without having to add a dedicated
+  /// connector method per command. The caller parses the returned byte.
+  Future<int> queryRawByte(List<int> request, {int timeoutMs = 500}) async {
+    final PrinterConnector<PrinterDevice> connector =
+        _assertConnected('queryRawByte');
+    return connector.queryRawByte(request, timeoutMs: timeoutMs);
   }
 
   /// Current connection state of the active connector.

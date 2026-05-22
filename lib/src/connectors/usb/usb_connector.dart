@@ -59,7 +59,8 @@ class UsbConnector extends PrinterConnector<UsbPrinterDevice> {
   }
 
   @override
-  Future<void> writeBytes(List<int> bytes) => _impl.writeBytes(bytes);
+  Future<void> writeBytes(List<int> bytes, {bool verifyStatus = true}) =>
+      _impl.writeBytes(bytes, verifyStatus: verifyStatus);
 
   @override
   Future<PrinterStatus> queryStatus({int timeoutMs = 2000}) =>

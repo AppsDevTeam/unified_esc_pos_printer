@@ -14,6 +14,7 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     // Per-device connection state, keyed by peripheral UUID string
     private var connectedPeripherals: [String: CBPeripheral] = [:]
     private var txCharacteristics: [String: CBCharacteristic] = [:]
+    private var notifyCharacteristics: [String: CBCharacteristic] = [:]
     private var mtuPayloads: [String: Int] = [:]
     private var canWriteWithoutResponses: [String: Bool] = [:]
     private var connectResults: [String: FlutterResult] = [:]
@@ -25,6 +26,7 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var targetCharUUIDs: [String: CBUUID] = [:]
 
     var connectionStateCallback: ((String, String) -> Void)?
+    var incomingBytesCallback: ((String, Data) -> Void)?
 
     /// Continuations waiting for CBCentralManager to leave the `.unknown` state.
     /// Each is called with `true` when the state becomes `.poweredOn`, or
@@ -282,8 +284,19 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     private func cleanupConnection(_ deviceId: String) {
         connectTimers.removeValue(forKey: deviceId)?.invalidate()
+        // Disable notifications on the cached notify characteristic, if
+        // any, before dropping the reference. iOS Core Bluetooth keeps
+        // a subscription on the peripheral even after we let go of the
+        // characteristic object — leaving stale notifications running
+        // would feed bytes to nobody and confuse the next reconnect.
+        if let peripheral = connectedPeripherals[deviceId],
+           let nf = notifyCharacteristics[deviceId],
+           peripheral.state == .connected {
+            peripheral.setNotifyValue(false, for: nf)
+        }
         connectedPeripherals.removeValue(forKey: deviceId)
         txCharacteristics.removeValue(forKey: deviceId)
+        notifyCharacteristics.removeValue(forKey: deviceId)
         mtuPayloads.removeValue(forKey: deviceId)
         canWriteWithoutResponses.removeValue(forKey: deviceId)
         pendingWriteDatas.removeValue(forKey: deviceId)
@@ -377,27 +390,43 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
         guard txCharacteristics[id] == nil else { return } // Already found
 
-        // 1. Try target service/characteristic UUIDs
-        if let targetSvc = targetServiceUUIDs[id], service.uuid == targetSvc {
-            if let chars = service.characteristics {
-                for c in chars {
-                    if c.uuid == targetCharUUIDs[id] && isWritable(c) {
-                        selectCharacteristic(c, peripheral: peripheral)
-                        return
-                    }
+        var txChar: CBCharacteristic?
+        var notifyChar: CBCharacteristic?
+
+        // 1. Try target service/characteristic UUIDs first.
+        if let targetSvc = targetServiceUUIDs[id], service.uuid == targetSvc,
+           let chars = service.characteristics {
+            for c in chars {
+                if txChar == nil && c.uuid == targetCharUUIDs[id] && isWritable(c) {
+                    txChar = c
+                }
+                if notifyChar == nil && isNotifiable(c) {
+                    notifyChar = c
                 }
             }
         }
 
-        // 2. Fallback: any writable characteristic
-        if let chars = service.characteristics {
+        // 2. Fallback: any writable characteristic on this service, plus
+        //    any notifiable sibling for ASB / status pushes.
+        if txChar == nil, let chars = service.characteristics {
             for c in chars {
-                if isWritable(c) {
-                    selectCharacteristic(c, peripheral: peripheral)
-                    return
+                if txChar == nil && isWritable(c) {
+                    txChar = c
+                }
+                if notifyChar == nil && isNotifiable(c) {
+                    notifyChar = c
                 }
             }
         }
+
+        guard let tx = txChar else { return }
+
+        if let nf = notifyChar {
+            notifyCharacteristics[id] = nf
+            peripheral.setNotifyValue(true, for: nf)
+        }
+
+        selectCharacteristic(tx, peripheral: peripheral)
     }
 
     private func selectCharacteristic(_ char: CBCharacteristic, peripheral: CBPeripheral) {
@@ -412,6 +441,24 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         connectTimers.removeValue(forKey: id)?.invalidate()
         connectResults.removeValue(forKey: id)?(nil)
         connectionStateCallback?(id, "connected")
+    }
+
+    /// Forwards bytes from a subscribed notify / indicate characteristic to
+    /// the Dart side via [incomingBytesCallback]. Consumed by the per-
+    /// connector AsbMonitor to parse Automatic Status Back (ESC/POS
+    /// `GS a`) packets.
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        if error != nil { return }
+        guard let value = characteristic.value, !value.isEmpty else { return }
+        let id = deviceId(for: peripheral)
+        // Copy the value to break any aliasing with the underlying Core
+        // Bluetooth buffer before we hop to the main queue.
+        let payload = Data(value)
+        if let cb = incomingBytesCallback {
+            DispatchQueue.main.async {
+                cb(id, payload)
+            }
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -434,6 +481,10 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     private func isWritable(_ c: CBCharacteristic) -> Bool {
         return c.properties.contains(.write) || c.properties.contains(.writeWithoutResponse)
+    }
+
+    private func isNotifiable(_ c: CBCharacteristic) -> Bool {
+        return c.properties.contains(.notify) || c.properties.contains(.indicate)
     }
 }
 

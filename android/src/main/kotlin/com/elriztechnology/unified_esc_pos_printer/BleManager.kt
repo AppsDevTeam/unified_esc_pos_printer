@@ -22,6 +22,11 @@ class BleManager(private val context: Context) {
             UUID.fromString("000018f0-0000-1000-8000-00805f9b34fb")
         private val ESC_POS_TX_CHAR_UUID =
             UUID.fromString("00002af1-0000-1000-8000-00805f9b34fb")
+        // Client Characteristic Configuration Descriptor — standard CCCD
+        // UUID, written to enable/disable notifications on a GATT
+        // characteristic.
+        private val CCCD_UUID =
+            UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }
 
     private val bluetoothAdapter: BluetoothAdapter? =
@@ -40,6 +45,7 @@ class BleManager(private val context: Context) {
     // Per-device connection state
     private val gatts = mutableMapOf<String, BluetoothGatt>()
     private val txCharacteristics = mutableMapOf<String, BluetoothGattCharacteristic>()
+    private val notifyCharacteristics = mutableMapOf<String, BluetoothGattCharacteristic>()
     private val negotiatedMtus = mutableMapOf<String, Int>()
     private val writeWithoutResponses = mutableMapOf<String, Boolean>()
     private val connectResults = mutableMapOf<String, MethodChannel.Result>()
@@ -51,6 +57,7 @@ class BleManager(private val context: Context) {
     private var disposed = false
 
     var connectionStateCallback: ((String, String) -> Unit)? = null
+    var incomingBytesCallback: ((String, ByteArray) -> Unit)? = null
 
     val scanStreamHandler = object : EventChannel.StreamHandler {
         override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -269,6 +276,7 @@ class BleManager(private val context: Context) {
                 }
 
                 var foundChar: BluetoothGattCharacteristic? = null
+                var foundNotifyChar: BluetoothGattCharacteristic? = null
 
                 // 1. Try target service/characteristic UUIDs
                 val targetService = g.getService(targetServiceUuids[deviceId])
@@ -292,6 +300,31 @@ class BleManager(private val context: Context) {
                     }
                 }
 
+                // Look for a notify/indicate characteristic so we can
+                // receive ASB pushes (paper-out, cover-open, …). Prefer
+                // one on the same service as the TX char; otherwise take
+                // the first across all services.
+                val txService = foundChar?.service
+                if (txService != null) {
+                    for (c in txService.characteristics) {
+                        if (isNotifiable(c)) {
+                            foundNotifyChar = c
+                            break
+                        }
+                    }
+                }
+                if (foundNotifyChar == null) {
+                    for (service in g.services) {
+                        for (c in service.characteristics) {
+                            if (isNotifiable(c)) {
+                                foundNotifyChar = c
+                                break
+                            }
+                        }
+                        if (foundNotifyChar != null) break
+                    }
+                }
+
                 mainHandler.post {
                     mainHandler.removeCallbacks(timeoutRunnable)
                     if (foundChar == null) {
@@ -306,6 +339,34 @@ class BleManager(private val context: Context) {
                         writeWithoutResponses[deviceId] =
                             (foundChar.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) == 0 &&
                             (foundChar.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+
+                        // Enable notifications on the RX characteristic if
+                        // we found one — printers that support ASB push
+                        // their 4-byte status packets through this path.
+                        if (foundNotifyChar != null) {
+                            notifyCharacteristics[deviceId] = foundNotifyChar
+                            try {
+                                g.setCharacteristicNotification(foundNotifyChar, true)
+                                val cccd = foundNotifyChar.getDescriptor(CCCD_UUID)
+                                if (cccd != null) {
+                                    val enable = if ((foundNotifyChar.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0)
+                                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                    else
+                                        BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        g.writeDescriptor(cccd, enable)
+                                    } else {
+                                        @Suppress("DEPRECATION")
+                                        cccd.value = enable
+                                        @Suppress("DEPRECATION")
+                                        g.writeDescriptor(cccd)
+                                    }
+                                }
+                            } catch (_: SecurityException) {
+                                // Permissions lost between discovery and CCCD write — ASB just won't work.
+                            }
+                        }
+
                         connectResults.remove(deviceId)?.success(null)
                         connectionStateCallback?.invoke(deviceId, "connected")
                     }
@@ -325,6 +386,38 @@ class BleManager(private val context: Context) {
                     } else {
                         pendingResult?.error("WRITE_FAILED", "BLE write failed with status $status", null)
                     }
+                }
+            }
+
+            // Android 13+ — receives the value as a parameter directly.
+            override fun onCharacteristicChanged(
+                g: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                value: ByteArray
+            ) {
+                if (disposed || value.isEmpty()) return
+                val payload = value.copyOf()
+                val cb = incomingBytesCallback
+                if (cb != null) {
+                    mainHandler.post { cb(deviceId, payload) }
+                }
+            }
+
+            // Android <13 — characteristic.value is mutable on the GATT
+            // thread, so snapshot it before posting to main.
+            @Deprecated("Superseded on API 33; kept for older devices")
+            override fun onCharacteristicChanged(
+                g: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic
+            ) {
+                if (disposed) return
+                @Suppress("DEPRECATION")
+                val raw = characteristic.value ?: return
+                if (raw.isEmpty()) return
+                val payload = raw.copyOf()
+                val cb = incomingBytesCallback
+                if (cb != null) {
+                    mainHandler.post { cb(deviceId, payload) }
                 }
             }
         }
@@ -478,6 +571,7 @@ class BleManager(private val context: Context) {
 
         gatts.remove(deviceId)
         txCharacteristics.remove(deviceId)
+        notifyCharacteristics.remove(deviceId)
         negotiatedMtus.remove(deviceId)
         writeWithoutResponses.remove(deviceId)
         connectResults.remove(deviceId)
@@ -490,5 +584,11 @@ class BleManager(private val context: Context) {
         val props = c.properties
         return (props and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ||
                 (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+    }
+
+    private fun isNotifiable(c: BluetoothGattCharacteristic): Boolean {
+        val props = c.properties
+        return (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 ||
+                (props and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
     }
 }

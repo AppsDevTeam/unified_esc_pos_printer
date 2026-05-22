@@ -27,6 +27,10 @@ class BluetoothPlatformChannel {
     'com.elriztechnology.unified_esc_pos_printer/connection_state',
   );
 
+  static const EventChannel _incomingBytesEvent = EventChannel(
+    'com.elriztechnology.unified_esc_pos_printer/incoming_bytes',
+  );
+
   /// Request Bluetooth permissions required by the current platform.
   ///
   /// Returns `true` if all required permissions were granted.
@@ -74,15 +78,18 @@ class BluetoothPlatformChannel {
   /// Returns the negotiated MTU payload size (already minus ATT overhead).
   Future<int> bleGetMtu({required String deviceId}) async {
     return await _method.invokeMethod<int>('bleGetMtu', {
-      'deviceId': deviceId,
-    }) ?? 20;
+          'deviceId': deviceId,
+        }) ??
+        20;
   }
 
   /// Returns whether the connected characteristic supports write-without-response.
-  Future<bool> bleSupportsWriteWithoutResponse({required String deviceId}) async {
+  Future<bool> bleSupportsWriteWithoutResponse(
+      {required String deviceId}) async {
     return await _method.invokeMethod<bool>('bleSupportsWriteWithoutResponse', {
-      'deviceId': deviceId,
-    }) ?? false;
+          'deviceId': deviceId,
+        }) ??
+        false;
   }
 
   /// Write a single chunk of data to the connected BLE characteristic.
@@ -105,9 +112,10 @@ class BluetoothPlatformChannel {
     int timeoutMs = 500,
   }) async {
     return await _method.invokeMethod<int>('bleQueryStatus', {
-      'deviceId': deviceId,
-      'timeoutMs': timeoutMs,
-    }) ?? -1;
+          'deviceId': deviceId,
+          'timeoutMs': timeoutMs,
+        }) ??
+        -1;
   }
 
   /// Disconnect the BLE connection for the given device.
@@ -197,10 +205,11 @@ class BluetoothPlatformChannel {
     int timeoutMs = 500,
   }) async {
     return await _method.invokeMethod<int>('btQueryStatus', {
-      'address': address,
-      'n': n,
-      'timeoutMs': timeoutMs,
-    }) ?? -1;
+          'address': address,
+          'n': n,
+          'timeoutMs': timeoutMs,
+        }) ??
+        -1;
   }
 
   /// Disconnect the Classic Bluetooth connection for the given [address].
@@ -222,10 +231,35 @@ class BluetoothPlatformChannel {
   /// The stream is shared (broadcast) — multiple connectors can listen
   /// without interfering with each other's subscriptions.
   Stream<Map<String, dynamic>> get connectionStateStream {
-    _connectionStateStreamCache ??=
-        _connectionStateEvent.receiveBroadcastStream().map((event) {
-      return Map<String, dynamic>.from(event as Map);
-    }).asBroadcastStream();
-    return _connectionStateStreamCache!;
+    final Stream<Map<String, dynamic>>? cached = _connectionStateStreamCache;
+    if (cached != null) return cached;
+    final Stream<Map<String, dynamic>> created = _connectionStateEvent
+        .receiveBroadcastStream()
+        .map((event) => Map<String, dynamic>.from(event as Map))
+        .asBroadcastStream();
+    _connectionStateStreamCache = created;
+    return created;
+  }
+
+  Stream<Map<String, dynamic>>? _incomingBytesStreamCache;
+
+  /// Stream of raw incoming bytes from BLE notify characteristic and
+  /// Bluetooth Classic input stream. Each event is a map with:
+  /// - `type`: `"ble"` or `"bt"`
+  /// - `deviceId`: the device identifier (MAC address or UUID)
+  /// - `bytes`: the raw incoming bytes as `Uint8List`
+  ///
+  /// Consumed by per-connector `AsbMonitor` instances to parse Automatic
+  /// Status Back (ESC/POS `GS a`) packets. The stream is shared and
+  /// broadcast — connectors must filter by `type` and `deviceId`.
+  Stream<Map<String, dynamic>> get incomingBytesStream {
+    final Stream<Map<String, dynamic>>? cached = _incomingBytesStreamCache;
+    if (cached != null) return cached;
+    final Stream<Map<String, dynamic>> created = _incomingBytesEvent
+        .receiveBroadcastStream()
+        .map((event) => Map<String, dynamic>.from(event as Map))
+        .asBroadcastStream();
+    _incomingBytesStreamCache = created;
+    return created;
   }
 }
