@@ -49,7 +49,7 @@ dependencies:
   unified_esc_pos_printer:
     git:
       url: https://github.com/AppsDevTeam/unified_esc_pos_printer.git
-      ref: v3.8.2
+      ref: v3.8.3
 ```
 
 ### Android Setup
