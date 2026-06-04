@@ -432,7 +432,15 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private func selectCharacteristic(_ char: CBCharacteristic, peripheral: CBPeripheral) {
         let id = deviceId(for: peripheral)
         txCharacteristics[id] = char
-        let useWithoutResponse = !char.properties.contains(.write) && char.properties.contains(.writeWithoutResponse)
+        // Prefer write-without-response whenever the characteristic supports
+        // it, even if it also advertises write-with-response. Most ESC/POS
+        // printers expose both; with-response forces a per-chunk ATT ACK
+        // round-trip (and a prepared/long-write sequence for chunks > MTU),
+        // sending only one packet per connection event — an order of
+        // magnitude slower. Without-response lets iOS pipeline several
+        // packets per event with flow control via
+        // peripheralIsReady(toSendWriteWithoutResponse:).
+        let useWithoutResponse = char.properties.contains(.writeWithoutResponse)
         canWriteWithoutResponses[id] = useWithoutResponse
 
         let writeType: CBCharacteristicWriteType = useWithoutResponse ? .withoutResponse : .withResponse

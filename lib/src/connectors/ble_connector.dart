@@ -39,9 +39,20 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
   /// [chunkDelay] — if set, the connector waits this long after every chunk
   /// write before sending the next one. A value of 5–20 ms is usually enough
   /// to eliminate stepped printing without noticeably slowing throughput.
+  ///
+  /// [syncEveryBytes] — flow-control "barrier" for write-without-response.
+  /// When the connector writes without response (no per-chunk ATT ack), it
+  /// forces a single write-with-response roughly every this many bytes. That
+  /// with-response write blocks until the printer's GATT layer acks, which
+  /// drains its receive buffer and bounds how far the fast unacked burst can
+  /// run ahead of a slow printer — preventing the silent buffer overflow that
+  /// corrupts long raster jobs. Set to `null` to disable the barrier (pure
+  /// without-response). Ignored when writes already use with-response.
+  /// Defaults to 4 KB, which keeps ~80–90% of without-response throughput.
   BleConnector({
     this.maxChunkSize,
     this.chunkDelay,
+    this.syncEveryBytes = 4096,
   });
 
   /// Maximum bytes per BLE write operation, or `null` to use the full
@@ -50,6 +61,10 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
 
   /// Optional delay inserted after each chunk write for throttling.
   final Duration? chunkDelay;
+
+  /// Interval, in bytes, at which a write-without-response burst inserts one
+  /// write-with-response as a drain/sync point. `null` disables the barrier.
+  final int? syncEveryBytes;
 
   final BluetoothPlatformChannel _platform = BluetoothPlatformChannel.instance;
 
@@ -363,20 +378,43 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
         : _mtuPayload;
 
     final int chunks = (bytes.length / effectiveChunkSize).ceil();
+
+    // Flow-control barrier for the write-without-response fast path. When
+    // enabled, every `syncEvery` bytes one chunk is sent with-response; its
+    // blocking ack drains the printer's receive buffer and bounds how far the
+    // unacked burst runs ahead of a slow printer. `0` disables the barrier.
+    final int syncEvery = _writeWithoutResponse ? (syncEveryBytes ?? 0) : 0;
+    final bool barrierEnabled = syncEvery > 0;
+
     PrinterLogger.debug(
       _tag,
       'Writing ${bytes.length} bytes in $chunks chunk(s) '
-      '(chunkSize: $effectiveChunkSize, delay: ${chunkDelay?.inMilliseconds ?? 0}ms)',
+      '(chunkSize: $effectiveChunkSize, delay: ${chunkDelay?.inMilliseconds ?? 0}ms, '
+      'syncEveryBytes: ${barrierEnabled ? syncEvery : 'off'})',
     );
 
     try {
+      int bytesSinceSync = 0;
       for (int i = 0; i < bytes.length; i += effectiveChunkSize) {
         final int end = (i + effectiveChunkSize).clamp(0, bytes.length);
+        bytesSinceSync += end - i;
+
+        // Force a with-response write at each barrier interval and on the
+        // final chunk, so the last bytes are acknowledged before the
+        // post-write status check runs.
+        final bool isLastChunk = end >= bytes.length;
+        final bool syncNow =
+            barrierEnabled && (bytesSinceSync >= syncEvery || isLastChunk);
+
         await _platform.bleWrite(
           deviceId: deviceId,
           data: Uint8List.fromList(bytes.sublist(i, end)),
-          withoutResponse: _writeWithoutResponse,
+          withoutResponse: _writeWithoutResponse && !syncNow,
         );
+
+        if (syncNow) {
+          bytesSinceSync = 0;
+        }
 
         // Throttle: wait between chunks to let the printer drain its buffer.
         if (chunkDelay != null && end < bytes.length) {
