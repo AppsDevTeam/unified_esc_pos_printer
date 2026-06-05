@@ -234,6 +234,13 @@ class BleManager(private val context: Context) {
                     mainHandler.post {
                         mainHandler.removeCallbacks(timeoutRunnable)
 
+                        // Fail any in-flight write so the Dart-side `await bleWrite`
+                        // throws on disconnect instead of leaking the result and
+                        // hanging the print forever. The onCharacteristicWrite path
+                        // removes the same entry, so remove() here guarantees only
+                        // one of them resolves it (a double reply would crash).
+                        writeResults.remove(deviceId)?.error("DISCONNECTED", "BLE device disconnected during write", null)
+
                         val pendingResult = connectResults.remove(deviceId)
                         if (pendingResult != null) {
                             pendingResult.error("DISCONNECTED", "BLE device disconnected during setup", null)

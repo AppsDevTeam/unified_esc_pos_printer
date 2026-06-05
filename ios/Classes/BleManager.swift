@@ -22,8 +22,17 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var pendingWriteDatas: [String: Data] = [:]
     private var pendingWriteResults: [String: FlutterResult] = [:]
     private var connectTimers: [String: Timer] = [:]
+    private var writeTimeoutWorkItems: [String: DispatchWorkItem] = [:]
     private var targetServiceUUIDs: [String: CBUUID] = [:]
     private var targetCharUUIDs: [String: CBUUID] = [:]
+
+    /// Backstop timeout for a single BLE write. CoreBluetooth resolves a
+    /// write only via `didWriteValueFor` (with-response) or
+    /// `peripheralIsReady` (without-response, buffer-full path); if the
+    /// printer stalls or vanishes without ever firing `didDisconnectPeripheral`,
+    /// neither callback arrives and the FlutterResult would leak — hanging
+    /// the Dart-side `await bleWrite` forever. This bounds that wait.
+    private let writeTimeoutSeconds: TimeInterval = 8.0
 
     var connectionStateCallback: ((String, String) -> Void)?
     var incomingBytesCallback: ((String, Data) -> Void)?
@@ -225,18 +234,44 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
 
+        // Fast path: buffer has room, the write is fire-and-forget, so it
+        // can never stall waiting on a callback — resolve immediately.
+        if withoutResponse && peripheral.canSendWriteWithoutResponse {
+            peripheral.writeValue(data, for: char, type: .withoutResponse)
+            result(nil)
+            return
+        }
+
+        // One-shot guard so neither the CoreBluetooth callback, the
+        // backstop timeout, nor a disconnect cleanup can resolve the same
+        // FlutterResult twice.
+        var settled = false
+        let settle: FlutterResult = { [weak self] value in
+            guard !settled else { return }
+            settled = true
+            self?.writeTimeoutWorkItems.removeValue(forKey: deviceId)?.cancel()
+            result(value)
+        }
+
         if withoutResponse {
-            if peripheral.canSendWriteWithoutResponse {
-                peripheral.writeValue(data, for: char, type: .withoutResponse)
-                result(nil)
-            } else {
-                pendingWriteDatas[deviceId] = data
-                pendingWriteResults[deviceId] = result
-            }
+            pendingWriteDatas[deviceId] = data
+            pendingWriteResults[deviceId] = settle
         } else {
-            writeResults[deviceId] = result
+            writeResults[deviceId] = settle
             peripheral.writeValue(data, for: char, type: .withResponse)
         }
+
+        // Backstop: fail the write if no callback arrives in time so the
+        // Dart-side await can't hang forever on a silently stalled link.
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.writeResults.removeValue(forKey: deviceId)
+            self.pendingWriteResults.removeValue(forKey: deviceId)
+            self.pendingWriteDatas.removeValue(forKey: deviceId)
+            settle(FlutterError(code: "WRITE_FAILED", message: "BLE write timed out", details: nil))
+        }
+        writeTimeoutWorkItems[deviceId] = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + writeTimeoutSeconds, execute: workItem)
     }
 
     /// Sends DLE EOT status query via write-with-response.  The write ACK
@@ -284,6 +319,15 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     private func cleanupConnection(_ deviceId: String) {
         connectTimers.removeValue(forKey: deviceId)?.invalidate()
+        writeTimeoutWorkItems.removeValue(forKey: deviceId)?.cancel()
+        // Fail any in-flight write so the Dart-side `await bleWrite`
+        // throws immediately on disconnect instead of leaking the
+        // FlutterResult and hanging the print job forever. The settle
+        // guard makes a double-resolution (callback already fired) a
+        // no-op, so this is safe to call unconditionally.
+        let disconnectError = FlutterError(code: "DISCONNECTED", message: "BLE device disconnected during write", details: nil)
+        writeResults.removeValue(forKey: deviceId)?(disconnectError)
+        pendingWriteResults.removeValue(forKey: deviceId)?(disconnectError)
         // Disable notifications on the cached notify characteristic, if
         // any, before dropping the reference. iOS Core Bluetooth keeps
         // a subscription on the peripheral even after we let go of the
