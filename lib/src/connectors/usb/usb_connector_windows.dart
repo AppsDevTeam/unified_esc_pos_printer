@@ -7,6 +7,7 @@ import '../../exceptions/printer_exception.dart';
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
 import '../../models/printer_status.dart';
+import '../../models/usb_scan_filter.dart';
 import 'usb_connector_interface.dart';
 
 /// USB connector for Windows using the native Print Spooler API.
@@ -16,6 +17,12 @@ import 'usb_connector_interface.dart';
 /// which is the standard way to send ESC/POS bytes to an installed printer on
 /// Windows (whether connected via USB, network, or virtual PDF printer).
 class UsbConnectorImpl extends UsbConnectorBase {
+  /// [scanFilter] is accepted for API parity with the Android implementation,
+  /// which is the only one enumerating raw USB descriptors.
+  UsbConnectorImpl({
+    UsbScanFilter scanFilter = UsbScanFilter.printerCandidatesOnly,
+  });
+
   static const MethodChannel _method = MethodChannel(
     'com.elriztechnology.unified_esc_pos_printer/methods',
   );

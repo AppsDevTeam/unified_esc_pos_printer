@@ -91,10 +91,10 @@ packages:
     dependency: transitive
     description:
       name: meta
-      sha256: "23f08335362185a5ea2ad3a4e597f1375e78bce8a040df5c600c8d3552ef2394"
+      sha256: "1741988757a65eb6b36abe716829688cf01910bbf91c34354ff7ec1c3de2b349"
       url: "https://pub.dev"
     source: hosted
-    version: "1.17.0"
+    version: "1.18.0"
   path:
     dependency: transitive
     description:
@@ -138,16 +138,16 @@ packages:
       path: ".."
       relative: true
     source: path
-    version: "3.8.1"
+    version: "3.8.4"
   usb_serial:
     dependency: transitive
     description:
       path: "."
-      ref: "v0.8.0"
-      resolved-ref: "45a98630f853a62e1c4a2deb69d95de156d5571b"
+      ref: "v0.9.0"
+      resolved-ref: e6844671538921f293782408ec088d67cb15f418
       url: "https://github.com/AppsDevTeam/usbserial.git"
     source: git
-    version: "0.8.0"
+    version: "0.9.0"
   vector_math:
     dependency: transitive
     description:
@@ -165,5 +165,5 @@ packages:
     source: hosted
     version: "6.6.1"
 sdks:
-  dart: ">=3.9.0-0 <4.0.0"
+  dart: ">=3.10.0-0 <4.0.0"
   flutter: ">=3.10.0"

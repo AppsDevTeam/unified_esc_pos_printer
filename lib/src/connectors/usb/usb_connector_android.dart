@@ -9,6 +9,7 @@ import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
 import '../../models/printer_status.dart';
 import '../../models/printer_status_detail.dart';
+import '../../models/usb_scan_filter.dart';
 import '../../utils/printer_logger.dart';
 import '../asb_monitor.dart';
 import '../post_write_status.dart';
@@ -23,6 +24,16 @@ const String _tag = 'USB-Android';
 /// Requests USB permission before opening the port, then configures it for
 /// 115200 baud 8N1 communication (standard for ESC/POS USB printers).
 class UsbConnectorImpl extends UsbConnectorBase {
+  /// Per-candidate cap for the serial type probe. A serial driver handed a
+  /// device that speaks a different protocol blocks on control transfers,
+  /// and six candidates in a row add up to a visible freeze.
+  static const Duration _probeTimeout = Duration(seconds: 3);
+
+  /// Decides which enumerated devices [scan] reports.
+  final UsbScanFilter scanFilter;
+
+  UsbConnectorImpl({this.scanFilter = UsbScanFilter.printerCandidatesOnly});
+
   UsbPort? _port;
   // Broadcast view of [_port.inputStream] — see network_connector for the
   // reason. Plain port.inputStream is single-subscription, so re-listening
@@ -61,11 +72,16 @@ class UsbConnectorImpl extends UsbConnectorBase {
   }) async* {
     _setState(PrinterConnectionState.scanning);
     PrinterLogger.info(_tag, 'Scanning for USB devices');
-    final List<UsbDevice> devices = await UsbSerial.listDevices();
+    final List<UsbDevice> allDevices = await UsbSerial.listDevices();
+    final List<UsbDevice> devices = _applyScanFilter(allDevices);
     _setState(PrinterConnectionState.disconnected);
 
     if (devices.isNotEmpty) {
-      PrinterLogger.info(_tag, 'Found ${devices.length} USB device(s)');
+      PrinterLogger.info(
+        _tag,
+        'Found ${devices.length} USB device(s) '
+        '(${allDevices.length} enumerated, filter=${scanFilter.name})',
+      );
       yield devices
           .map((d) => UsbPrinterDevice(
                 name: d.productName ?? 'USB Device ${d.vid}:${d.pid}',
@@ -122,60 +138,92 @@ class UsbConnectorImpl extends UsbConnectorBase {
       'deviceId=${found.deviceId}',
     );
 
+    // Refuse hubs even when the caller reached one past the scan filter.
+    // Serial drivers probe with control transfers that reset a hub, which
+    // takes every device behind it — the printer included — off the bus.
+    if (found.isHub) {
+      PrinterLogger.error(
+        _tag,
+        'Device ${device.identifier} is a USB hub, refusing to open it',
+      );
+      _setState(PrinterConnectionState.error);
+      _setState(PrinterConnectionState.disconnected);
+      throw PrinterNotFoundException(
+        'USB device ${device.identifier} is a hub, not a printer',
+      );
+    }
+
     UsbPort? port;
     String selectedType = '';
     bool selectedRaw = false;
     try {
-      // Try auto-detect first, then fall back to known serial chip types.
-      // ESC/POS printers often aren't recognized by auto-detect.
-      // We must also try open() because some types create successfully but fail to open.
-      const List<String> typesToTry = [
-        '',
-        UsbSerial.CDC,
-        UsbSerial.CH34x,
-        UsbSerial.CP210x,
-        UsbSerial.FTDI,
-        UsbSerial.PL2303
-      ];
-      bool opened = false;
-      for (final String type in typesToTry) {
-        final String label = type.isEmpty ? 'auto' : type;
-        try {
-          PrinterLogger.debug(_tag, 'Trying serial type: "$label"');
-          final UsbPort? candidate = await found.create(type);
-          if (candidate == null) {
-            PrinterLogger.debug(_tag, '  → create("$label") returned null');
-            continue;
-          }
-          final bool didOpen = await candidate.open();
-          if (didOpen) {
-            port = candidate;
-            opened = true;
-            selectedType = label;
-            PrinterLogger.info(_tag, 'Serial type "$label" worked');
-            break;
-          }
-          // open() failed — close and try next
-          PrinterLogger.debug(_tag, '  → "$label" open() returned false');
-          await candidate.close();
-        } catch (e) {
-          PrinterLogger.debug(_tag, '  → "$label" threw: $e');
-        }
-      }
-
-      // If no serial type worked, try raw bulk USB transfer (for direct USB printers).
-      if (!opened) {
+      if (found.isPrinterClass) {
+        // USB Printer class: plain bulk transfer with no serial protocol
+        // underneath. Serial drivers cannot open it, and every failed probe
+        // claims the interface and pushes control transfers the device does
+        // not understand — so skip them entirely.
         PrinterLogger.info(
-            _tag, 'Serial types failed, falling back to raw USB');
-        port = await UsbSerial.createRawFromDeviceId(found.deviceId);
-        if (port == null) {
-          throw Exception('Could not create UsbPort – device not recognized');
-        }
-        opened = await port.open();
-        PrinterLogger.info(_tag, 'Raw USB open: $opened');
-        if (!opened) throw Exception('UsbPort.open() returned false');
+            _tag, 'USB Printer class device — using raw bulk transfer');
+        port = await _openRaw(found);
         selectedType = 'raw';
         selectedRaw = true;
+      } else {
+        // Try auto-detect first, then fall back to known serial chip types.
+        // ESC/POS printers often aren't recognized by auto-detect.
+        // We must also try open() because some types create successfully but fail to open.
+        const List<String> typesToTry = [
+          '',
+          UsbSerial.CDC,
+          UsbSerial.CH34x,
+          UsbSerial.CP210x,
+          UsbSerial.FTDI,
+          UsbSerial.PL2303
+        ];
+        bool opened = false;
+        for (final String type in typesToTry) {
+          final String label = type.isEmpty ? 'auto' : type;
+          try {
+            PrinterLogger.debug(_tag, 'Trying serial type: "$label"');
+            final UsbPort? candidate =
+                await found.create(type).timeout(_probeTimeout);
+            if (candidate == null) {
+              PrinterLogger.debug(_tag, '  → create("$label") returned null');
+              continue;
+            }
+            final bool didOpen = await candidate.open().timeout(_probeTimeout);
+            if (didOpen) {
+              port = candidate;
+              opened = true;
+              selectedType = label;
+              PrinterLogger.info(_tag, 'Serial type "$label" worked');
+              break;
+            }
+            // open() failed — close and try next
+            PrinterLogger.debug(_tag, '  → "$label" open() returned false');
+            await candidate.close();
+          } on PlatformException catch (e) {
+            // A missing permission fails every remaining candidate the same
+            // way, and each retry pops another system dialog. Stop here and
+            // let the caller surface it as a permission problem.
+            final UsbException usbError = UsbException.fromPlatformException(e);
+            if (usbError.code == UsbErrorCode.permissionDenied) rethrow;
+            PrinterLogger.debug(_tag, '  → "$label" threw: $usbError');
+          } on TimeoutException {
+            PrinterLogger.debug(
+                _tag, '  → "$label" timed out after ${_probeTimeout.inSeconds}s');
+          } catch (e) {
+            PrinterLogger.debug(_tag, '  → "$label" threw: $e');
+          }
+        }
+
+        // If no serial type worked, try raw bulk USB transfer (for direct USB printers).
+        if (!opened) {
+          PrinterLogger.info(
+              _tag, 'Serial types failed, falling back to raw USB');
+          port = await _openRaw(found);
+          selectedType = 'raw';
+          selectedRaw = true;
+        }
       }
 
       final UsbPort openPort = port ?? (throw Exception('port is null'));
@@ -413,6 +461,43 @@ class UsbConnectorImpl extends UsbConnectorBase {
   Future<void> dispose() async {
     await disconnect();
     await _stateController.close();
+  }
+
+  /// Opens [device] as a raw bulk endpoint pair — the transport for USB
+  /// Printer class devices and for serial bridges no driver recognises.
+  Future<UsbPort> _openRaw(UsbDevice device) async {
+    final UsbPort? rawPort =
+        await UsbSerial.createRawFromDeviceId(device.deviceId);
+    if (rawPort == null) {
+      throw Exception('Could not create UsbPort – device not recognized');
+    }
+    final bool opened = await rawPort.open();
+    PrinterLogger.info(_tag, 'Raw USB open: $opened');
+    if (!opened) throw Exception('UsbPort.open() returned false');
+    return rawPort;
+  }
+
+  /// Devices the active [scanFilter] allows to surface. A device the platform
+  /// did not describe (no interface descriptors) is kept rather than dropped,
+  /// so the filter can never hide a printer it failed to classify.
+  List<UsbDevice> _applyScanFilter(List<UsbDevice> devices) {
+    if (scanFilter == UsbScanFilter.all) return devices;
+
+    return devices.where((UsbDevice d) {
+      if (d.interfaces.isEmpty) return true;
+
+      if (d.isHub) {
+        PrinterLogger.debug(
+            _tag, 'Skipping ${d.vid}:${d.pid} (${d.productName}) — USB hub');
+        return false;
+      }
+      if (!d.hasBulkOut) {
+        PrinterLogger.debug(_tag,
+            'Skipping ${d.vid}:${d.pid} (${d.productName}) — no bulk OUT endpoint');
+        return false;
+      }
+      return true;
+    }).toList();
   }
 
   void _setState(PrinterConnectionState next) {

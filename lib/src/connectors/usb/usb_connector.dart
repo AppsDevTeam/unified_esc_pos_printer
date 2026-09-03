@@ -3,6 +3,7 @@ import 'dart:io';
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
 import '../../models/printer_status.dart';
+import '../../models/usb_scan_filter.dart';
 import '../printer_connector.dart';
 import 'usb_connector_android.dart'
     if (dart.library.html) 'usb_connector_stub.dart' as android_impl;
@@ -21,17 +22,24 @@ import 'usb_connector_windows.dart'
 /// - [usb_connector_desktop.dart] on Linux, macOS (serial port)
 /// - [usb_connector_stub.dart] on unsupported platforms
 class UsbConnector extends PrinterConnector<UsbPrinterDevice> {
-  UsbConnector() : _impl = _createImpl();
+  /// [scanFilter] decides which enumerated USB devices [scan] reports.
+  UsbConnector({
+    UsbScanFilter scanFilter = UsbScanFilter.printerCandidatesOnly,
+  }) : _impl = _createImpl(scanFilter);
 
   final UsbConnectorBase _impl;
 
-  static UsbConnectorBase _createImpl() {
-    if (Platform.isAndroid) return android_impl.UsbConnectorImpl();
-    if (Platform.isWindows) return windows_impl.UsbConnectorImpl();
-    if (Platform.isLinux || Platform.isMacOS) {
-      return desktop_impl.UsbConnectorImpl();
+  static UsbConnectorBase _createImpl(UsbScanFilter scanFilter) {
+    if (Platform.isAndroid) {
+      return android_impl.UsbConnectorImpl(scanFilter: scanFilter);
     }
-    return stub_impl.UsbConnectorImpl();
+    if (Platform.isWindows) {
+      return windows_impl.UsbConnectorImpl(scanFilter: scanFilter);
+    }
+    if (Platform.isLinux || Platform.isMacOS) {
+      return desktop_impl.UsbConnectorImpl(scanFilter: scanFilter);
+    }
+    return stub_impl.UsbConnectorImpl(scanFilter: scanFilter);
   }
 
   @override

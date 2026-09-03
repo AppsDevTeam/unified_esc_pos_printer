@@ -8,6 +8,7 @@ import '../../exceptions/printer_exception.dart';
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
 import '../../models/printer_status.dart';
+import '../../models/usb_scan_filter.dart';
 import '../../utils/printer_logger.dart';
 import '../post_write_status.dart';
 import 'usb_connector_interface.dart';
@@ -20,6 +21,12 @@ const String _tag = 'USB-Desktop';
 /// Scans via [SerialPort.availablePorts] and opens the selected COM/tty port
 /// configured for 115200 baud 8N1.
 class UsbConnectorImpl extends UsbConnectorBase {
+  /// [scanFilter] is accepted for API parity with the Android implementation,
+  /// which is the only one enumerating raw USB descriptors.
+  UsbConnectorImpl({
+    UsbScanFilter scanFilter = UsbScanFilter.printerCandidatesOnly,
+  });
+
   SerialPort? _port;
   SerialPortReader? _reader;
 

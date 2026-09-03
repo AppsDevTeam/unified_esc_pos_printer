@@ -32,6 +32,10 @@ class AsbMonitor {
   final StreamController<PrinterStatusDetail> _statusController =
       StreamController<PrinterStatusDetail>.broadcast();
 
+  /// Raw bytes of the last packet, so repeats of an unchanged status can be
+  /// recognised without giving [PrinterStatusDetail] value equality.
+  List<int>? _lastPacketBytes;
+
   Timer? _idleTimer;
   StreamSubscription<List<int>>? _sub;
   PrinterStatusDetail _latest = const PrinterStatusDetail();
@@ -144,7 +148,22 @@ class AsbMonitor {
       eot4: packet[3],
     );
     _latest = detail;
-    PrinterLogger.debug(tag, 'ASB: packet $detail');
+
+    // Some printers push ASB periodically rather than only on change, so the
+    // same "everything is fine" packet arrives every few seconds forever.
+    // Logging each repeat buries every other line in the log and reads like a
+    // busy loop. Log the first packet and every actual change, stay quiet in
+    // between; the status stream still gets every packet.
+    final List<int>? previous = _lastPacketBytes;
+    final bool changed = previous == null ||
+        previous[0] != packet[0] ||
+        previous[1] != packet[1] ||
+        previous[2] != packet[2] ||
+        previous[3] != packet[3];
+    _lastPacketBytes = packet;
+
+    if (changed) PrinterLogger.debug(tag, 'ASB: packet $detail');
+
     if (!_statusController.isClosed) _statusController.add(detail);
 
     final Completer<bool>? first = _firstPacketCompleter;
@@ -154,6 +173,7 @@ class AsbMonitor {
   }
 
   Future<void> _detach() async {
+    _lastPacketBytes = null;
     _idleTimer?.cancel();
     _idleTimer = null;
     await _sub?.cancel();

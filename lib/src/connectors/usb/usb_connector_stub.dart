@@ -4,12 +4,19 @@ import '../../exceptions/printer_exception.dart';
 import '../../models/printer_connection_state.dart';
 import '../../models/printer_device.dart';
 import '../../models/printer_status.dart';
+import '../../models/usb_scan_filter.dart';
 import 'usb_connector_interface.dart';
 
 /// Stub USB connector for unsupported platforms (web, Fuchsia, etc.).
 ///
 /// All methods throw [PrinterPlatformUnsupportedException].
 class UsbConnectorImpl extends UsbConnectorBase {
+  /// [scanFilter] is accepted for API parity with the Android implementation,
+  /// which is the only one enumerating raw USB descriptors.
+  UsbConnectorImpl({
+    UsbScanFilter scanFilter = UsbScanFilter.printerCandidatesOnly,
+  });
+
   @override
   Stream<PrinterConnectionState> get stateStream =>
       const Stream<PrinterConnectionState>.empty();
