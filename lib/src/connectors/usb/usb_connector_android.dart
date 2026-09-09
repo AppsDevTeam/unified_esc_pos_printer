@@ -43,6 +43,15 @@ class UsbConnectorImpl extends UsbConnectorBase {
   PrinterConnectionState _state = PrinterConnectionState.disconnected;
   bool? _supportsRealtimeStatus;
   AsbMonitor? _asb;
+
+  // Platform record of the device [_port] was opened on, kept so a detach
+  // broadcast can be matched against the device we actually hold open.
+  UsbDevice? _openDevice;
+
+  // Subscription to the platform USB attach/detach broadcast — see
+  // [_watchDetach].
+  StreamSubscription<UsbEvent>? _usbEventSub;
+
   final StreamController<PrinterConnectionState> _stateController =
       StreamController<PrinterConnectionState>.broadcast();
 
@@ -242,6 +251,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
       await openPort.write(Uint8List.fromList(cInit.codeUnits));
 
       _port = openPort;
+      _openDevice = found;
       _inboundStream = openPort.inputStream?.asBroadcastStream();
       PrinterLogger.info(
         _tag,
@@ -250,6 +260,10 @@ class UsbConnectorImpl extends UsbConnectorBase {
         'inputStream=${openPort.inputStream == null ? "null (READS DISABLED)" : "available"})',
       );
       _setState(PrinterConnectionState.connected);
+
+      // Subscribe before the status probes below, so a device that leaves the
+      // bus mid-handshake is noticed too.
+      await _watchDetach();
 
       // Prefer ASB over DLE EOT polling — see NetworkConnector for the
       // rationale. Falls back to the original probe if the printer
@@ -280,12 +294,16 @@ class UsbConnectorImpl extends UsbConnectorBase {
       final UsbException usbError = UsbException.fromPlatformException(e);
       PrinterLogger.error(_tag, 'USB error: $usbError');
       await port?.close();
+      await _stopWatchingDetach();
+      _openDevice = null;
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw _mapUsbException(usbError, device.identifier);
     } catch (e) {
       PrinterLogger.error(_tag, 'Connection failed: $e');
       await port?.close();
+      await _stopWatchingDetach();
+      _openDevice = null;
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
       throw PrinterConnectionException(
@@ -444,6 +462,8 @@ class UsbConnectorImpl extends UsbConnectorBase {
     PrinterLogger.info(_tag, 'Disconnecting');
     _setState(PrinterConnectionState.disconnecting);
 
+    await _stopWatchingDetach();
+
     await _asb?.dispose();
     _asb = null;
 
@@ -451,6 +471,7 @@ class UsbConnectorImpl extends UsbConnectorBase {
       await _port?.close();
     } finally {
       _port = null;
+      _openDevice = null;
       _inboundStream = null;
       _supportsRealtimeStatus = null;
       _setState(PrinterConnectionState.disconnected);
@@ -461,6 +482,104 @@ class UsbConnectorImpl extends UsbConnectorBase {
   Future<void> dispose() async {
     await disconnect();
     await _stateController.close();
+  }
+
+  /// Watches the platform USB attach/detach broadcast so a printer that is
+  /// switched off, unplugged or power-cycled tears the connection down the
+  /// moment it leaves the bus.
+  ///
+  /// Without this the port handle stays open on our side and [state] keeps
+  /// reporting `connected` indefinitely — waiting does not help, because
+  /// nothing else ever invalidates it. The loss then surfaces only on the
+  /// next write, costing the caller one failed print job before it
+  /// reconnects. The other transports already get this signal: the network
+  /// connector from `Socket.done`, BLE and Bluetooth Classic from their
+  /// platform connection-state events.
+  Future<void> _watchDetach() async {
+    // Never leave an earlier subscription running — an orphan keeps firing
+    // teardowns for a device this connector no longer holds.
+    await _stopWatchingDetach();
+
+    final Stream<UsbEvent>? events = UsbSerial.usbEventStream;
+    if (events == null) {
+      PrinterLogger.warning(
+        _tag,
+        'usbEventStream unavailable — a detach will only surface on the next write',
+      );
+      return;
+    }
+
+    _usbEventSub = events.listen(
+      (UsbEvent event) {
+        if (event.event != UsbEvent.ACTION_USB_DETACHED) return;
+
+        // Read [_openDevice] at event time rather than capturing the device
+        // this subscription was opened for — a teardown that already ran has
+        // nulled it, which turns a late-firing broadcast into a no-op.
+        final UsbDevice? open = _openDevice;
+        if (open == null || !_isOpenDevice(event.device, open)) return;
+
+        unawaited(_onDeviceDetached());
+      },
+      onError: (Object e) {
+        PrinterLogger.warning(_tag, 'usbEventStream error: $e');
+      },
+    );
+  }
+
+  /// Cancels the attach/detach subscription, if one is running.
+  Future<void> _stopWatchingDetach() async {
+    final StreamSubscription<UsbEvent>? sub = _usbEventSub;
+    _usbEventSub = null;
+    await sub?.cancel();
+  }
+
+  /// Whether the device a broadcast fired for is the one we hold open.
+  ///
+  /// `deviceId` identifies the exact plug instance and is the reliable match.
+  /// It is nullable on the Dart side, so vid/pid is kept as a fallback — two
+  /// identical printers on one bus would both match it, but taking down a
+  /// live connection one device too eagerly only costs a reconnect, while
+  /// missing the detach brings back the failed-first-print bug.
+  bool _isOpenDevice(UsbDevice? detached, UsbDevice open) {
+    if (detached == null) return false;
+
+    final int? detachedId = detached.deviceId;
+    final int? openId = open.deviceId;
+    if (detachedId != null && openId != null) return detachedId == openId;
+
+    return detached.vid == open.vid && detached.pid == open.pid;
+  }
+
+  /// Tears the connection down after the device left the bus.
+  ///
+  /// Mirrors [NetworkConnector]'s remote-close handling: the state passes
+  /// through `error` so anything waiting on [stateStream] wakes up, then
+  /// settles on `disconnected` so the next [connect] passes its state
+  /// assertion and dials up a fresh port.
+  Future<void> _onDeviceDetached() async {
+    if (_state == PrinterConnectionState.disconnected) return;
+    PrinterLogger.warning(_tag, 'USB device detached — dropping connection');
+
+    await _stopWatchingDetach();
+
+    await _asb?.dispose();
+    _asb = null;
+
+    // The handle is already dead — closing it is best-effort housekeeping and
+    // must not mask the teardown if the platform throws on a gone device.
+    try {
+      await _port?.close();
+    } catch (e) {
+      PrinterLogger.debug(_tag, 'close() on detached device threw: $e');
+    }
+
+    _port = null;
+    _openDevice = null;
+    _inboundStream = null;
+    _supportsRealtimeStatus = null;
+    _setState(PrinterConnectionState.error);
+    _setState(PrinterConnectionState.disconnected);
   }
 
   /// Opens [device] as a raw bulk endpoint pair — the transport for USB
