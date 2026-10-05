@@ -16,6 +16,7 @@ import io.flutter.plugin.common.MethodChannel
 import android.util.Log
 import java.io.IOException
 import java.io.OutputStream
+import java.lang.reflect.InvocationTargetException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -190,6 +191,13 @@ class BluetoothClassicManager(private val context: Context) {
             return
         }
 
+        // A connection with Bluetooth off can only fail, and the generic
+        // failure would send the user to check the printer, not the phone.
+        if (!adapter.isEnabled) {
+            result.error("BLUETOOTH_DISABLED", "Bluetooth is turned off", null)
+            return
+        }
+
         val device: BluetoothDevice
         try {
             device = adapter.getRemoteDevice(address)
@@ -207,29 +215,7 @@ class BluetoothClassicManager(private val context: Context) {
                 // Cancel discovery before connecting (improves reliability)
                 try { adapter.cancelDiscovery() } catch (_: SecurityException) {}
 
-                // Try secure RFCOMM first, then insecure, then reflection fallback.
-                // Pre-paired devices from OS settings often fail the secure SDP
-                // lookup, so fallbacks are essential.
-                val sock = try {
-                    val s = device.createRfcommSocketToServiceRecord(SPP_UUID)
-                    s.connect()
-                    s
-                } catch (_: IOException) {
-                    try {
-                        val s = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
-                        s.connect()
-                        s
-                    } catch (_: IOException) {
-                        // Last resort: reflection-based socket on port 1
-                        val m = device.javaClass.getMethod(
-                            "createRfcommSocket",
-                            Int::class.javaPrimitiveType
-                        )
-                        val s = m.invoke(device, 1) as BluetoothSocket
-                        s.connect()
-                        s
-                    }
-                }
+                val sock = openRfcommSocket(device)
 
                 sockets[address] = sock
                 outputStreams[address] = sock.outputStream
@@ -290,6 +276,14 @@ class BluetoothClassicManager(private val context: Context) {
             } catch (e: IOException) {
                 mainHandler.post {
                     result.error("CONNECTION_FAILED", "Bluetooth Classic connection failed", e.message)
+                }
+            } catch (e: Exception) {
+                // An exception escaping a raw Thread kills the whole app
+                // process, so anything unexpected is reported as a failed
+                // connection instead.
+                Log.e("PrinterSDK", "BT connect: unexpected failure ($address)", e)
+                mainHandler.post {
+                    result.error("CONNECTION_FAILED", "Bluetooth Classic connection failed", e.toString())
                 }
             }
         }.start()
@@ -371,6 +365,55 @@ class BluetoothClassicManager(private val context: Context) {
         val addresses = sockets.keys.toList()
         for (address in addresses) {
             cleanupConnection(address)
+        }
+    }
+
+    /// Opens an SPP socket to [device]: secure RFCOMM first, then insecure,
+    /// then a reflection-based socket on channel 1 as a last resort.
+    /// Pre-paired devices from OS settings often fail the secure SDP lookup,
+    /// so the fallbacks are essential. Throws the IOException of the last
+    /// attempt when all of them fail.
+    private fun openRfcommSocket(device: BluetoothDevice): BluetoothSocket {
+        try {
+            return connectSocket { device.createRfcommSocketToServiceRecord(SPP_UUID) }
+        } catch (_: IOException) {}
+        try {
+            return connectSocket { device.createInsecureRfcommSocketToServiceRecord(SPP_UUID) }
+        } catch (_: IOException) {}
+        return connectSocket { createRfcommSocketOnChannel1(device) }
+    }
+
+    /// Creates a socket and connects it, closing the socket when connect()
+    /// fails so a failed attempt does not leak it.
+    private fun connectSocket(create: () -> BluetoothSocket): BluetoothSocket {
+        val socket = create()
+        try {
+            socket.connect()
+        } catch (e: IOException) {
+            try { socket.close() } catch (_: IOException) {}
+            throw e
+        }
+        return socket
+    }
+
+    /// Calls the hidden `BluetoothDevice.createRfcommSocket(int)`.
+    /// Method.invoke wraps whatever the method throws in an
+    /// InvocationTargetException — Android 16 throws IOException from the
+    /// method itself — so the cause is unwrapped here; reflection failures
+    /// (method missing or blocked) surface as IOException as well.
+    private fun createRfcommSocketOnChannel1(device: BluetoothDevice): BluetoothSocket {
+        try {
+            val method = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+            return method.invoke(device, 1) as? BluetoothSocket
+                ?: throw IOException("createRfcommSocket returned no socket")
+        } catch (e: InvocationTargetException) {
+            when (val cause = e.targetException) {
+                is IOException -> throw cause
+                is RuntimeException -> throw cause
+                else -> throw IOException("createRfcommSocket failed", cause)
+            }
+        } catch (e: ReflectiveOperationException) {
+            throw IOException("createRfcommSocket unavailable", e)
         }
     }
 

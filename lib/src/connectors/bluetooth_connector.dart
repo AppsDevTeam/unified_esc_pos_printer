@@ -319,6 +319,13 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       PrinterLogger.error(_tag, 'Connection failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
+      if (e is PlatformException &&
+          e.code == BluetoothPlatformChannel.bluetoothDisabledCode) {
+        throw PrinterBluetoothDisabledException(
+          'Bluetooth is turned off',
+          cause: e,
+        );
+      }
       throw PrinterConnectionException(
         'Bluetooth connection to ${device.address} failed',
         cause: e,

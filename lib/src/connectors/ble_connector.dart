@@ -254,6 +254,13 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
       PrinterLogger.error(_tag, 'Connection failed: $e');
       _setState(PrinterConnectionState.error);
       _setState(PrinterConnectionState.disconnected);
+      if (e is PlatformException &&
+          e.code == BluetoothPlatformChannel.bluetoothDisabledCode) {
+        throw PrinterBluetoothDisabledException(
+          'Bluetooth is turned off',
+          cause: e,
+        );
+      }
       throw PrinterConnectionException(
         'BLE connection to ${device.name} failed',
         cause: e,
