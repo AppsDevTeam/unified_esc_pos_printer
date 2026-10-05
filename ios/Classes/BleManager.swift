@@ -182,7 +182,13 @@ class BleManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
         waitForPoweredOn { [weak self] isPoweredOn in
             guard let self = self, let cm = self.centralManager, isPoweredOn else {
-                result(FlutterError(code: "UNAVAILABLE", message: "Bluetooth is not powered on", details: nil))
+                // Bluetooth switched off gets its own code so the caller can
+                // tell the user to turn it on instead of checking the printer.
+                if self?.centralManager?.state == .poweredOff {
+                    result(FlutterError(code: "BLUETOOTH_DISABLED", message: "Bluetooth is turned off", details: nil))
+                } else {
+                    result(FlutterError(code: "UNAVAILABLE", message: "Bluetooth is not powered on", details: nil))
+                }
                 return
             }
 

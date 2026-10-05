@@ -189,6 +189,13 @@ class BleManager(private val context: Context) {
             return
         }
 
+        // A connection with Bluetooth off can only fail, and the generic
+        // failure would send the user to check the printer, not the phone.
+        if (!adapter.isEnabled) {
+            result.error("BLUETOOTH_DISABLED", "Bluetooth is turned off", null)
+            return
+        }
+
         targetServiceUuids[deviceId] = serviceUuid?.let { UUID.fromString(it) } ?: ESC_POS_SERVICE_UUID
         targetCharUuids[deviceId] = characteristicUuid?.let { UUID.fromString(it) } ?: ESC_POS_TX_CHAR_UUID
 

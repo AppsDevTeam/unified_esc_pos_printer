@@ -11,6 +11,10 @@ class BluetoothPlatformChannel {
 
   static final BluetoothPlatformChannel instance = BluetoothPlatformChannel._();
 
+  /// Error code the native side returns from connect when Bluetooth is
+  /// switched off on the device.
+  static const String bluetoothDisabledCode = 'BLUETOOTH_DISABLED';
+
   static const MethodChannel _method = MethodChannel(
     'com.elriztechnology.unified_esc_pos_printer/methods',
   );

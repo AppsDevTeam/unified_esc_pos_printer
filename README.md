@@ -356,6 +356,8 @@ The package provides a typed exception hierarchy:
 try {
   await manager.connect(device);
   await manager.printTicket(ticket);
+} on PrinterBluetoothDisabledException catch (e) {
+  print('Turn Bluetooth on: ${e.message}');
 } on PrinterConnectionException catch (e) {
   print('Connection failed: ${e.message}');
 } on PrinterWriteException catch (e) {

@@ -25,7 +25,8 @@ class PrinterNotFoundException extends PrinterException {
 /// Has more specific subtypes — match against them first when handling errors:
 /// [PrinterTimeoutException], [PrinterUnreachableException],
 /// [PrinterPlatformUnsupportedException],
-/// [PrinterDisconnectedDuringOperationException].
+/// [PrinterDisconnectedDuringOperationException],
+/// [PrinterBluetoothDisabledException].
 class PrinterConnectionException extends PrinterException {
   const PrinterConnectionException(super.message, {super.cause});
 }
@@ -63,6 +64,17 @@ class PrinterDisconnectedDuringOperationException
     super.message, {
     super.cause,
   });
+}
+
+/// Bluetooth is switched off on this device, so a Bluetooth Classic or BLE
+/// connection was not attempted at all.
+///
+/// Raised only when a new connection is being established — a connection
+/// opened earlier is left alone and keeps working for as long as the
+/// platform keeps it up. Retrying is pointless until the user turns
+/// Bluetooth back on.
+class PrinterBluetoothDisabledException extends PrinterConnectionException {
+  const PrinterBluetoothDisabledException(super.message, {super.cause});
 }
 
 /// An operation was attempted from an invalid state.
