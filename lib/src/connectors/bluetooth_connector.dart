@@ -385,8 +385,7 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
       _setState(PrinterConnectionState.connected);
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
-      _setState(PrinterConnectionState.error);
-      _setState(PrinterConnectionState.disconnected);
+      await _dropConnection();
       throw PrinterWriteException('Bluetooth write failed', cause: e);
     }
 
@@ -537,6 +536,34 @@ class BluetoothConnector extends PrinterConnector<BluetoothPrinterDevice> {
     } finally {
       _setState(PrinterConnectionState.disconnected);
     }
+  }
+
+  /// Tears the connection down after a write failed.
+  ///
+  /// Moving the state to `disconnected` without closing the socket would leave
+  /// it open for good, since [disconnect] returns early once the state is
+  /// `disconnected`, and the next [connect] would open a second one to the
+  /// same printer.
+  Future<void> _dropConnection() async {
+    await _connectionSub?.cancel();
+    _connectionSub = null;
+
+    await _asb?.dispose();
+    _asb = null;
+
+    final String? address = _connectedAddress;
+    _connectedAddress = null;
+    _supportsRealtimeStatus = null;
+    if (address != null) {
+      try {
+        await _platform.btDisconnect(address: address);
+      } catch (e) {
+        PrinterLogger.debug(_tag, 'disconnect after a failed write threw: $e');
+      }
+    }
+
+    _setState(PrinterConnectionState.error);
+    _setState(PrinterConnectionState.disconnected);
   }
 
   @override
