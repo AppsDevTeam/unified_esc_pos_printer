@@ -345,8 +345,7 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       _setState(PrinterConnectionState.connected);
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
-      _setState(PrinterConnectionState.error);
-      _setState(PrinterConnectionState.disconnected);
+      await _dropConnection();
       throw PrinterWriteException('Failed to write bytes to printer', cause: e);
     }
 
@@ -492,6 +491,28 @@ class NetworkConnector extends PrinterConnector<NetworkPrinterDevice> {
       _supportsRealtimeStatus = null;
       _setState(PrinterConnectionState.disconnected);
     }
+  }
+
+  /// Tears the connection down after a write failed.
+  ///
+  /// Moving the state to `disconnected` without closing the socket would leave
+  /// it open for good, since [disconnect] returns early once the state is
+  /// `disconnected` — and so does the [Socket.done] handler. Many printers
+  /// accept a single connection on port 9100, so the next [connect] could be
+  /// refused while the old one lingers.
+  Future<void> _dropConnection() async {
+    _disconnectInitiatedLocally = true;
+
+    await _asb?.dispose();
+    _asb = null;
+
+    _socket?.destroy();
+    _socket = null;
+    _inboundStream = null;
+    _supportsRealtimeStatus = null;
+
+    _setState(PrinterConnectionState.error);
+    _setState(PrinterConnectionState.disconnected);
   }
 
   /// Invoked from [Socket.done] when the OS socket closes. [local] is true

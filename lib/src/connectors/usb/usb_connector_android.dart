@@ -352,13 +352,11 @@ class UsbConnectorImpl extends UsbConnectorBase {
     } on PlatformException catch (e) {
       final UsbException usbError = UsbException.fromPlatformException(e);
       PrinterLogger.error(_tag, 'Write failed: $usbError');
-      _setState(PrinterConnectionState.error);
-      _setState(PrinterConnectionState.disconnected);
+      await _dropConnection();
       throw _mapUsbException(usbError, 'write');
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
-      _setState(PrinterConnectionState.error);
-      _setState(PrinterConnectionState.disconnected);
+      await _dropConnection();
       throw PrinterWriteException('USB write failed', cause: e);
     }
 
@@ -561,17 +559,29 @@ class UsbConnectorImpl extends UsbConnectorBase {
     if (_state == PrinterConnectionState.disconnected) return;
     PrinterLogger.warning(_tag, 'USB device detached — dropping connection');
 
+    await _dropConnection();
+  }
+
+  /// Closes the port and settles on `disconnected` after the connection was
+  /// lost: the device left the bus, or a write to it failed.
+  ///
+  /// The port must be closed here, not merely forgotten. [disconnect] returns
+  /// early once the state is `disconnected`, so a port left open at this point
+  /// is never closed — on Android its reader thread then keeps polling the
+  /// printer and posting to the main thread for the life of the process, and
+  /// the next [connect] opens a second one next to it.
+  Future<void> _dropConnection() async {
     await _stopWatchingDetach();
 
     await _asb?.dispose();
     _asb = null;
 
-    // The handle is already dead — closing it is best-effort housekeeping and
-    // must not mask the teardown if the platform throws on a gone device.
+    // The handle may be dead already — closing it is best-effort housekeeping
+    // and must not mask the teardown if the platform throws on a gone device.
     try {
       await _port?.close();
     } catch (e) {
-      PrinterLogger.debug(_tag, 'close() on detached device threw: $e');
+      PrinterLogger.debug(_tag, 'close() on a lost connection threw: $e');
     }
 
     _port = null;

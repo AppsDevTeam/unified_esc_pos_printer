@@ -432,8 +432,7 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
       _setState(PrinterConnectionState.connected);
     } catch (e) {
       PrinterLogger.error(_tag, 'Write failed: $e');
-      _setState(PrinterConnectionState.error);
-      _setState(PrinterConnectionState.disconnected);
+      await _dropConnection();
       throw PrinterWriteException('BLE write failed', cause: e);
     }
 
@@ -580,6 +579,34 @@ class BleConnector extends PrinterConnector<BlePrinterDevice> {
     } finally {
       _setState(PrinterConnectionState.disconnected);
     }
+  }
+
+  /// Tears the connection down after a write failed.
+  ///
+  /// A failed write does not mean the link is gone — the GATT connection can
+  /// still be up. Moving the state to `disconnected` without closing it would
+  /// leave it open for good, since [disconnect] returns early once the state
+  /// is `disconnected`, and the next [connect] would open a second one to the
+  /// same printer.
+  Future<void> _dropConnection() async {
+    await _connectionSub?.cancel();
+    _connectionSub = null;
+
+    await _asb?.dispose();
+    _asb = null;
+
+    final String? deviceId = _connectedDeviceId;
+    _connectedDeviceId = null;
+    if (deviceId != null) {
+      try {
+        await _platform.bleDisconnect(deviceId: deviceId);
+      } catch (e) {
+        PrinterLogger.debug(_tag, 'disconnect after a failed write threw: $e');
+      }
+    }
+
+    _setState(PrinterConnectionState.error);
+    _setState(PrinterConnectionState.disconnected);
   }
 
   @override
